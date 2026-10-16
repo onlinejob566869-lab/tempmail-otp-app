@@ -10,6 +10,8 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.tempmail.otp.data.ApiClient
+import com.tempmail.otp.data.EmailSummary
+import com.tempmail.otp.data.WebSocketCallback
 import com.tempmail.otp.util.NotificationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,9 +23,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Foreground service that keeps polling inboxes in the background
+ * Foreground service that keeps WebSocket connections alive in the background
  * even when the app is closed. Shows a persistent notification.
- * Uses longer polling interval + stagger + retry with backoff to avoid HTTP 429.
+ * Uses WebSocket real-time push instead of polling — eliminates HTTP 429.
  */
 class OtpPollingService : Service() {
 
@@ -32,9 +34,7 @@ class OtpPollingService : Service() {
         const val NOTIFICATION_ID = 2001
         const val EXTRA_ADDRESSES = "addresses"
 
-        private const val POLL_INTERVAL_MS = 10_000L  // 10 seconds between polls
-        private const val STAGGER_DELAY_MS = 2_000L   // 2 second offset per inbox
-        private const val INITIAL_BACKOFF_MS = 2_000L
+        private const val RECONNECT_DELAY_MS = 5_000L
 
         fun start(context: Context, addresses: List<String>) {
             val intent = Intent(context, OtpPollingService::class.java)
@@ -52,9 +52,10 @@ class OtpPollingService : Service() {
     }
 
     private val api = ApiClient.api
+    private val wsClient = ApiClient.webSocketClient
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val pollingJobs = mutableMapOf<String, Job>()
     private val seenIds = mutableMapOf<String, MutableSet<String>>()
+    private val reconnectJobs = mutableMapOf<String, Job>()
 
     override fun onCreate() {
         super.onCreate()
@@ -66,7 +67,7 @@ class OtpPollingService : Service() {
 
         intent?.getStringArrayExtra(EXTRA_ADDRESSES)?.let { addresses ->
             for ((index, address) in addresses.withIndex()) {
-                startPollingInbox(address, index)
+                startWebSocketInbox(address, index)
             }
             updateNotification("Monitoring ${addresses.size} inbox(es)...")
         }
@@ -75,46 +76,67 @@ class OtpPollingService : Service() {
     }
 
     /**
-     * Start polling a specific inbox with stagger offset and retry on 429.
+     * Start WebSocket connection for an inbox with stagger.
      */
-    private fun startPollingInbox(address: String, inboxIndex: Int = 0) {
-        pollingJobs[address]?.cancel()
+    private fun startWebSocketInbox(address: String, inboxIndex: Int = 0) {
         seenIds[address] = mutableSetOf()
+        val staggerMs = inboxIndex * 1_000L
 
-        // Stagger: offset each inbox's polling by STAGGER_DELAY_MS
-        val staggerOffset = inboxIndex * STAGGER_DELAY_MS
+        serviceScope.launch {
+            delay(staggerMs)
+            connectWebSocket(address)
+        }
+    }
 
-        pollingJobs[address] = serviceScope.launch {
-            delay(staggerOffset) // Stagger start to spread API calls
+    /**
+     * Connect WebSocket for real-time email push.
+     */
+    private fun connectWebSocket(address: String) {
+        wsClient.connect(address, object : WebSocketCallback {
+            override fun onConnected(addr: String) {
+                // Connected — emails will be pushed
+            }
 
-            var consecutiveErrors = 0
-            while (isActive) {
-                try {
-                    val response = api.listEmails(address)
-                    if (response.ok) {
-                        consecutiveErrors = 0
-                        for (email in response.emails) {
-                            val seen = seenIds[address] ?: mutableSetOf()
-                            if (email.id !in seen) {
-                                seen.add(email.id)
-                                seenIds[address] = seen
-                                handleNewEmail(address, email)
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    consecutiveErrors++
-                    // On 429 or network error, back off exponentially
-                    val backoff = INITIAL_BACKOFF_MS * (1L shl consecutiveErrors.coerceAtMost(4))
-                    delay(backoff)
-                    continue // Skip the normal delay, go straight to retry
+            override fun onEmailEvent(addr: String, email: EmailSummary) {
+                val seen = seenIds[addr] ?: mutableSetOf()
+                if (email.id !in seen) {
+                    seen.add(email.id)
+                    seenIds[addr] = seen
+                    handleNewEmail(addr, email)
                 }
-                delay(POLL_INTERVAL_MS)
+            }
+
+            override fun onDisconnected(addr: String) {
+                scheduleReconnect(addr)
+            }
+
+            override fun onError(addr: String, error: String) {
+                scheduleReconnect(addr)
+            }
+        })
+    }
+
+    /**
+     * Schedule WebSocket reconnection with backoff.
+     */
+    private fun scheduleReconnect(address: String) {
+        reconnectJobs[address]?.cancel()
+        reconnectJobs[address] = serviceScope.launch {
+            var attempt = 0
+            while (isActive) {
+                val backoff = RECONNECT_DELAY_MS * (1L shl attempt.coerceAtMost(5))
+                delay(backoff)
+                if (!isActive) break
+                if (wsClient.isConnected(address)) break
+                connectWebSocket(address)
+                attempt++
+                delay(3_000L)
+                if (wsClient.isConnected(address)) break
             }
         }
     }
 
-    private fun handleNewEmail(address: String, email: com.tempmail.otp.data.EmailSummary) {
+    private fun handleNewEmail(address: String, email: EmailSummary) {
         var otp = email.otpCode
         if (otp.isNullOrBlank()) {
             serviceScope.launch {
@@ -175,8 +197,9 @@ class OtpPollingService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        pollingJobs.values.forEach { it.cancel() }
-        pollingJobs.clear()
+        reconnectJobs.values.forEach { it.cancel() }
+        reconnectJobs.clear()
+        wsClient.disconnectAll()
         serviceScope.cancel()
     }
 

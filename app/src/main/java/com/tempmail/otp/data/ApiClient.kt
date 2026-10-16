@@ -12,13 +12,14 @@ object ApiClient {
 
     private const val BASE_URL = "https://mailboxtemp.com/"
 
-    private val moshi: Moshi = Moshi.Builder()
+    val moshi: Moshi = Moshi.Builder()
         .add(KotlinJsonAdapterFactory())
         .build()
 
-    private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
+    val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .pingInterval(30, TimeUnit.SECONDS) // Keep WebSocket alive
         .addInterceptor(HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         })
@@ -31,5 +32,9 @@ object ApiClient {
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(MailboxTempApi::class.java)
+    }
+
+    val webSocketClient: MailboxWebSocketClient by lazy {
+        MailboxWebSocketClient(okHttpClient)
     }
 }

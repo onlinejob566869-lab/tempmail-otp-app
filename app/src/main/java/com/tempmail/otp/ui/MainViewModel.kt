@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tempmail.otp.data.ApiClient
 import com.tempmail.otp.data.EmailSummary
+import com.tempmail.otp.data.WebSocketCallback
 import com.tempmail.otp.util.ClipboardHelper
 import com.tempmail.otp.util.NotificationHelper
 import kotlinx.coroutines.Job
@@ -40,6 +41,7 @@ sealed class UiState {
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val api = ApiClient.api
+    private val wsClient = ApiClient.webSocketClient
 
     private val _uiState = MutableStateFlow<UiState>(UiState.Idle)
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -50,14 +52,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _activeIndex = MutableStateFlow(0)
     val activeIndex: StateFlow<Int> = _activeIndex.asStateFlow()
 
-    private val pollingJobs = mutableMapOf<String, Job>()
     private val seenIds = mutableMapOf<String, MutableSet<String>>()
+    private val reconnectJobs = mutableMapOf<String, Job>()
 
     companion object {
-        private const val POLL_INTERVAL_MS = 10_000L  // 10 seconds between polls
-        private const val STAGGER_DELAY_MS = 2_000L   // 2 second offset per inbox
         private const val MAX_RETRIES = 5
-        private const val INITIAL_BACKOFF_MS = 2_000L // 2 seconds initial backoff
+        private const val INITIAL_BACKOFF_MS = 2_000L
 
         private const val PREFS_NAME = "tempmail_prefs"
         private const val KEY_ADDRESSES = "inbox_addresses"
@@ -79,7 +79,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Restore saved inbox addresses, OTPs, and active index on app startup.
-     * Automatically restarts polling for every restored inbox.
+     * Automatically reconnects WebSocket for every restored inbox.
      */
     private fun restoreState() {
         val sp = prefs()
@@ -113,8 +113,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _inboxes.value = restored
             _activeIndex.value = savedActive.coerceIn(0, restored.size - 1)
             _uiState.value = UiState.Ready(restored, _activeIndex.value)
-            // Restart polling for each restored inbox
-            restored.forEach { startPolling(it.address) }
+            // Reconnect WebSocket for each restored inbox (staggered)
+            restored.forEachIndexed { index, entry ->
+                startWebSocket(entry.address, index)
+            }
+            // Also do one initial fetch to get any emails that arrived while app was closed
+            restored.forEach { initialFetch(it.address) }
         }
     }
 
@@ -144,6 +148,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Create a new temp inbox with retry + exponential backoff for HTTP 429.
+     * After creation, opens a WebSocket for real-time email push (no polling).
      */
     fun createInbox() {
         viewModelScope.launch {
@@ -161,20 +166,110 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         ClipboardHelper.copyText(getApplication(), "Temp Email", address)
                         _uiState.value = UiState.Ready(_inboxes.value, _activeIndex.value)
                         saveState()
-                        startPolling(address)
+                        // Start WebSocket for real-time email push
+                        startWebSocket(address, _inboxes.value.size - 1)
                         return@launch
                     } else {
                         lastError = response.error ?: "Failed to create inbox"
                     }
                 } catch (e: Exception) {
                     lastError = e.message
-                    val backoff = INITIAL_BACKOFF_MS * (1L shl attempt) // 2s, 4s, 8s, 16s, 32s
+                    val backoff = INITIAL_BACKOFF_MS * (1L shl attempt)
                     _uiState.value = UiState.Error("Rate limited, retrying in ${backoff / 1000}s...")
                     delay(backoff)
                 }
             }
 
             _uiState.value = UiState.Error(lastError ?: "Failed to create inbox after $MAX_RETRIES attempts")
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────
+    //  WebSocket — real-time email push (replaces polling, no 429)
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * Start WebSocket connection for an inbox. New emails are pushed by the server.
+     * Reconnection with backoff happens automatically on disconnect.
+     */
+    fun startWebSocket(address: String, inboxIndex: Int = 0) {
+        // Stagger WebSocket connections to avoid burst
+        val staggerMs = inboxIndex * 1_000L
+
+        viewModelScope.launch {
+            delay(staggerMs)
+            connectWebSocket(address)
+        }
+    }
+
+    private fun connectWebSocket(address: String) {
+        wsClient.connect(address, object : WebSocketCallback {
+            override fun onConnected(addr: String) {
+                // WebSocket connected — emails will be pushed
+            }
+
+            override fun onEmailEvent(addr: String, email: EmailSummary) {
+                val seen = seenIds[addr] ?: mutableSetOf()
+                if (email.id !in seen) {
+                    seen.add(email.id)
+                    seenIds[addr] = seen
+                    handleNewEmail(addr, email)
+                }
+            }
+
+            override fun onDisconnected(addr: String) {
+                // Auto-reconnect with backoff
+                scheduleReconnect(addr)
+            }
+
+            override fun onError(addr: String, error: String) {
+                // Auto-reconnect with backoff
+                scheduleReconnect(addr)
+            }
+        })
+    }
+
+    /**
+     * Schedule WebSocket reconnection with exponential backoff.
+     */
+    private fun scheduleReconnect(address: String) {
+        reconnectJobs[address]?.cancel()
+        reconnectJobs[address] = viewModelScope.launch {
+            var attempt = 0
+            while (isActive) {
+                val backoff = INITIAL_BACKOFF_MS * (1L shl attempt.coerceAtMost(5))
+                delay(backoff)
+                if (!isActive) break
+                if (wsClient.isConnected(address)) break
+                connectWebSocket(address)
+                attempt++
+                // Wait before checking if reconnection succeeded
+                delay(3_000L)
+                if (wsClient.isConnected(address)) break
+            }
+        }
+    }
+
+    /**
+     * One-time fetch of emails for an inbox (used on restore).
+     * This is a single API call, not polling — safe from 429.
+     */
+    private fun initialFetch(address: String) {
+        viewModelScope.launch {
+            try {
+                val response = api.listEmails(address)
+                if (response.ok) {
+                    updateInboxEmails(address, response.emails)
+                    for (email in response.emails) {
+                        val seen = seenIds[address] ?: mutableSetOf()
+                        if (email.id !in seen) {
+                            seen.add(email.id)
+                            seenIds[address] = seen
+                            handleNewEmail(address, email)
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -205,50 +300,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ────────────────────────────────────────────────────────────
-    //  Polling
+    //  Email handling
     // ────────────────────────────────────────────────────────────
-
-    /**
-     * Start polling a specific inbox.
-     * Uses longer interval + stagger to avoid HTTP 429 with multiple inboxes.
-     * Includes retry with backoff on 429.
-     */
-    fun startPolling(address: String) {
-        pollingJobs[address]?.cancel()
-        seenIds[address] = mutableSetOf()
-
-        // Stagger: offset each inbox's polling by STAGGER_DELAY_MS
-        val staggerOffset = (_inboxes.value.indexOfFirst { it.address == address }).coerceAtLeast(0) * STAGGER_DELAY_MS
-
-        pollingJobs[address] = viewModelScope.launch {
-            delay(staggerOffset) // Stagger start to spread API calls
-
-            var consecutiveErrors = 0
-            while (isActive) {
-                try {
-                    val response = api.listEmails(address)
-                    if (response.ok) {
-                        consecutiveErrors = 0
-                        updateInboxEmails(address, response.emails)
-                        for (email in response.emails) {
-                            val seen = seenIds[address] ?: mutableSetOf()
-                            if (email.id !in seen) {
-                                seen.add(email.id)
-                                seenIds[address] = seen
-                                handleNewEmail(address, email)
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    consecutiveErrors++
-                    val backoff = (INITIAL_BACKOFF_MS * (1L shl consecutiveErrors.coerceAtMost(4)))
-                    delay(backoff)
-                    continue
-                }
-                delay(POLL_INTERVAL_MS)
-            }
-        }
-    }
 
     /**
      * Update the email list for a specific inbox in state.
@@ -316,21 +369,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     //  Inbox management
     // ────────────────────────────────────────────────────────────
 
-    fun stopPolling(address: String) {
-        pollingJobs[address]?.cancel()
-        pollingJobs.remove(address)
+    fun stopWebSocket(address: String) {
+        reconnectJobs[address]?.cancel()
+        reconnectJobs.remove(address)
+        wsClient.disconnect(address)
     }
 
-    fun stopAllPolling() {
-        pollingJobs.values.forEach { it.cancel() }
-        pollingJobs.clear()
+    fun stopAllWebSockets() {
+        reconnectJobs.values.forEach { it.cancel() }
+        reconnectJobs.clear()
+        wsClient.disconnectAll()
     }
 
     fun deleteInbox(index: Int) {
         if (index < 0 || index >= _inboxes.value.size) return
         val current = _inboxes.value.toMutableList()
         val removed = current.removeAt(index)
-        stopPolling(removed.address)
+        stopWebSocket(removed.address)
         _inboxes.value = current
         if (_activeIndex.value >= current.size) {
             _activeIndex.value = (current.size - 1).coerceAtLeast(0)
@@ -348,6 +403,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         saveState()
-        stopAllPolling()
+        stopAllWebSockets()
     }
 }
