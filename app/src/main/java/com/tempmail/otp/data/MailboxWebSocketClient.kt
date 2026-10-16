@@ -106,7 +106,7 @@ class MailboxWebSocketClient(
         try {
             // Parse as generic Map to inspect type field
             @Suppress("UNCHECKED_CAST")
-            val map: Map<String, Any?> = moshi.adapter(Map::class.java).fromJson(text) ?: return
+            val map = moshi.adapter(Map::class.java).fromJson(text) as? Map<String, Any?> ?: return
             val type = map["type"] as? String
 
             when (type) {
