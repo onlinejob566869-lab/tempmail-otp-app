@@ -53,12 +53,6 @@ android {
         abortOnError = false
         checkReleaseBuilds = false
     }
-
-    dexOptions {
-        javaMaxHeapSize = "768m"
-        maxProcessCount = 1
-        preDexLibraries = false
-    }
 }
 
 dependencies {

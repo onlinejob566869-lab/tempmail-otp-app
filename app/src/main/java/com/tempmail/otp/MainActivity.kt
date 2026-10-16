@@ -20,7 +20,7 @@ import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -360,7 +360,7 @@ fun ActiveInboxContent(
                         },
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Default.Stop, contentDescription = null)
+                        Icon(Icons.Default.Close, contentDescription = null)
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Stop BG", fontSize = 12.sp)
                     }

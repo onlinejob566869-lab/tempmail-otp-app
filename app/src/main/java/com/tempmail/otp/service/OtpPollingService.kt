@@ -59,7 +59,7 @@ class OtpPollingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification("Monitoring inboxes..."))
 
-        intent?.getStringExtraArray(EXTRA_ADDRESSES)?.let { addresses ->
+        intent?.getStringArrayExtra(EXTRA_ADDRESSES)?.let { addresses ->
             for (address in addresses) {
                 startPollingInbox(address)
             }
