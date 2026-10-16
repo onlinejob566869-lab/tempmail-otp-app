@@ -104,45 +104,42 @@ class MailboxWebSocketClient(
      */
     private fun handleMessage(address: String, text: String, callback: WebSocketCallback) {
         try {
-            val json = moshi.adapter(com.squareup.moshi.JsonObject::class.java)
-                .let { _ ->
-                    // Parse as generic map to inspect type field
-                    val mapAdapter = moshi.adapter(Map::class.java)
-                    val map = mapAdapter.fromJson(text)
-                    val type = map?.get("type") as? String
+            // Parse as generic Map to inspect type field
+            @Suppress("UNCHECKED_CAST")
+            val map: Map<String, Any?> = moshi.adapter(Map::class.java).fromJson(text) ?: return
+            val type = map["type"] as? String
 
-                    when (type) {
-                        "connected" -> {
-                            // Already handled in onOpen callback
-                        }
-                        "email", "message", "new_email" -> {
-                            // Extract email data from the message
-                            val emailMap = map["email"] as? Map<String, Any?>
-                                ?: map["message"] as? Map<String, Any?>
-                                ?: map["data"] as? Map<String, Any?>
+            when (type) {
+                "connected" -> {
+                    // Already handled in onOpen callback
+                }
+                "email", "message", "new_email" -> {
+                    // Extract email data from the message
+                    @Suppress("UNCHECKED_CAST")
+                    val emailMap = map["email"] as? Map<String, Any?>
+                        ?: map["message"] as? Map<String, Any?>
+                        ?: map["data"] as? Map<String, Any?>
 
-                            if (emailMap != null) {
-                                val emailJson = moshi.adapter(Map::class.java).toJson(emailMap)
-                                val email = moshi.adapter(EmailSummary::class.java).fromJson(emailJson)
-                                if (email != null) {
-                                    callback.onEmailEvent(address, email)
-                                }
-                            }
-                        }
-                        else -> {
-                            // Unknown message type — try to parse as email directly
-                            // Some implementations send the email object directly
-                            try {
-                                val email = moshi.adapter(EmailSummary::class.java).fromJson(text)
-                                if (email != null && email.id.isNotEmpty()) {
-                                    callback.onEmailEvent(address, email)
-                                }
-                            } catch (_: Exception) {
-                                Log.d("MailboxWS", "Unknown message type: $type, text: $text")
-                            }
+                    if (emailMap != null) {
+                        val emailJson = moshi.adapter(Map::class.java).toJson(emailMap)
+                        val email = moshi.adapter(EmailSummary::class.java).fromJson(emailJson)
+                        if (email != null) {
+                            callback.onEmailEvent(address, email)
                         }
                     }
                 }
+                else -> {
+                    // Unknown message type — try to parse as email directly
+                    try {
+                        val email = moshi.adapter(EmailSummary::class.java).fromJson(text)
+                        if (email != null && email.id.isNotEmpty()) {
+                            callback.onEmailEvent(address, email)
+                        }
+                    } catch (_: Exception) {
+                        Log.d("MailboxWS", "Unknown message type: $type, text: $text")
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e("MailboxWS", "Error parsing message from $address: ${e.message}", e)
         }
