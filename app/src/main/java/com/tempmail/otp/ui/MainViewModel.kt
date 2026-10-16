@@ -1,6 +1,7 @@
 package com.tempmail.otp.ui
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tempmail.otp.data.ApiClient
@@ -57,7 +58,89 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val STAGGER_DELAY_MS = 2_000L   // 2 second offset per inbox
         private const val MAX_RETRIES = 5
         private const val INITIAL_BACKOFF_MS = 2_000L // 2 seconds initial backoff
+
+        private const val PREFS_NAME = "tempmail_prefs"
+        private const val KEY_ADDRESSES = "inbox_addresses"
+        private const val KEY_OTPS = "inbox_otps"
+        private const val KEY_OTP_SOURCES = "inbox_otp_sources"
+        private const val KEY_ACTIVE_INDEX = "active_index"
     }
+
+    init {
+        restoreState()
+    }
+
+    // ────────────────────────────────────────────────────────────
+    //  Persistence — save / restore inbox data via SharedPreferences
+    // ────────────────────────────────────────────────────────────
+
+    private fun prefs(): android.content.SharedPreferences =
+        getApplication<Application>().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    /**
+     * Restore saved inbox addresses, OTPs, and active index on app startup.
+     * Automatically restarts polling for every restored inbox.
+     */
+    private fun restoreState() {
+        val sp = prefs()
+        val addresses = sp.getString(KEY_ADDRESSES, "") ?: ""
+        if (addresses.isBlank()) return
+
+        val addrList = addresses.split("\n").filter { it.isNotBlank() }
+        val otpMap = (sp.getString(KEY_OTPS, "") ?: "").split("\n")
+            .filter { it.isNotBlank() }
+            .associate {
+                val parts = it.split("\t", limit = 2)
+                (parts[0]) to (parts.getOrElse(1) { "" })
+            }
+        val otpSourceMap = (sp.getString(KEY_OTP_SOURCES, "") ?: "").split("\n")
+            .filter { it.isNotBlank() }
+            .associate {
+                val parts = it.split("\t", limit = 2)
+                (parts[0]) to (parts.getOrElse(1) { "" })
+            }
+        val savedActive = sp.getInt(KEY_ACTIVE_INDEX, 0)
+
+        val restored = addrList.map { addr ->
+            InboxEntry(
+                address = addr,
+                lastOtp = otpMap[addr]?.takeIf { it.isNotBlank() },
+                lastOtpFrom = otpSourceMap[addr]?.takeIf { it.isNotBlank() }
+            )
+        }
+
+        if (restored.isNotEmpty()) {
+            _inboxes.value = restored
+            _activeIndex.value = savedActive.coerceIn(0, restored.size - 1)
+            _uiState.value = UiState.Ready(restored, _activeIndex.value)
+            // Restart polling for each restored inbox
+            restored.forEach { startPolling(it.address) }
+        }
+    }
+
+    /**
+     * Save current inbox addresses, OTPs, and active index to SharedPreferences.
+     */
+    private fun saveState() {
+        val sp = prefs()
+        val addresses = _inboxes.value.joinToString("\n") { it.address }
+        val otps = _inboxes.value
+            .filter { !it.lastOtp.isNullOrBlank() }
+            .joinToString("\n") { "${it.address}\t${it.lastOtp}" }
+        val otpSources = _inboxes.value
+            .filter { !it.lastOtpFrom.isNullOrBlank() }
+            .joinToString("\n") { "${it.address}\t${it.lastOtpFrom}" }
+        sp.edit()
+            .putString(KEY_ADDRESSES, addresses)
+            .putString(KEY_OTPS, otps)
+            .putString(KEY_OTP_SOURCES, otpSources)
+            .putInt(KEY_ACTIVE_INDEX, _activeIndex.value)
+            .apply()
+    }
+
+    // ────────────────────────────────────────────────────────────
+    //  Inbox creation
+    // ────────────────────────────────────────────────────────────
 
     /**
      * Create a new temp inbox with retry + exponential backoff for HTTP 429.
@@ -77,6 +160,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _activeIndex.value = _inboxes.value.size - 1
                         ClipboardHelper.copyText(getApplication(), "Temp Email", address)
                         _uiState.value = UiState.Ready(_inboxes.value, _activeIndex.value)
+                        saveState()
                         startPolling(address)
                         return@launch
                     } else {
@@ -84,7 +168,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 } catch (e: Exception) {
                     lastError = e.message
-                    // If 429 or network error, wait with exponential backoff
                     val backoff = INITIAL_BACKOFF_MS * (1L shl attempt) // 2s, 4s, 8s, 16s, 32s
                     _uiState.value = UiState.Error("Rate limited, retrying in ${backoff / 1000}s...")
                     delay(backoff)
@@ -95,6 +178,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ────────────────────────────────────────────────────────────
+    //  Inbox switching
+    // ────────────────────────────────────────────────────────────
+
     /**
      * Switch active inbox — only the selected email is shown and copied.
      */
@@ -104,6 +191,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val active = _inboxes.value[index]
         ClipboardHelper.copyText(getApplication(), "Temp Email", active.address)
         _uiState.value = UiState.Ready(_inboxes.value, index)
+        saveState()
     }
 
     /**
@@ -116,6 +204,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ────────────────────────────────────────────────────────────
+    //  Polling
+    // ────────────────────────────────────────────────────────────
+
     /**
      * Start polling a specific inbox.
      * Uses longer interval + stagger to avoid HTTP 429 with multiple inboxes.
@@ -126,7 +218,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         seenIds[address] = mutableSetOf()
 
         // Stagger: offset each inbox's polling by STAGGER_DELAY_MS
-        val staggerOffset = (_inboxes.value.indexOfFirst { it.address == address }) * STAGGER_DELAY_MS
+        val staggerOffset = (_inboxes.value.indexOfFirst { it.address == address }).coerceAtLeast(0) * STAGGER_DELAY_MS
 
         pollingJobs[address] = viewModelScope.launch {
             delay(staggerOffset) // Stagger start to spread API calls
@@ -149,10 +241,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 } catch (e: Exception) {
                     consecutiveErrors++
-                    // On 429 or network error, back off exponentially
                     val backoff = (INITIAL_BACKOFF_MS * (1L shl consecutiveErrors.coerceAtMost(4)))
                     delay(backoff)
-                    continue // Skip the normal delay, go straight to retry
+                    continue
                 }
                 delay(POLL_INTERVAL_MS)
             }
@@ -213,12 +304,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         NotificationHelper.showOtpNotification(getApplication(), otp, from)
         _uiState.value = UiState.OtpFound(address, otp, from)
+        saveState()
     }
 
     private fun extractOtpRegex(text: String): String? {
         val regex = Regex("\\b(\\d{4,8})\\b")
         return regex.find(text)?.groupValues?.get(1)
     }
+
+    // ────────────────────────────────────────────────────────────
+    //  Inbox management
+    // ────────────────────────────────────────────────────────────
 
     fun stopPolling(address: String) {
         pollingJobs[address]?.cancel()
@@ -244,12 +340,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             _uiState.value = UiState.Ready(current, _activeIndex.value)
         }
+        saveState()
     }
 
     fun getAllAddresses(): List<String> = _inboxes.value.map { it.address }
 
     override fun onCleared() {
         super.onCleared()
+        saveState()
         stopAllPolling()
     }
 }
