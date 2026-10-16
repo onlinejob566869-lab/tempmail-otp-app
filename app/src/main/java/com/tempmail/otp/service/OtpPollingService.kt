@@ -3,7 +3,6 @@ package com.tempmail.otp.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -23,6 +22,7 @@ import kotlinx.coroutines.launch
 /**
  * Foreground service that keeps polling inboxes in the background
  * even when the app is closed. Shows a persistent notification.
+ * Uses longer polling interval + stagger + retry with backoff to avoid HTTP 429.
  */
 class OtpPollingService : Service() {
 
@@ -30,6 +30,10 @@ class OtpPollingService : Service() {
         const val CHANNEL_ID = "otp_polling_service"
         const val NOTIFICATION_ID = 2001
         const val EXTRA_ADDRESSES = "addresses"
+
+        private const val POLL_INTERVAL_MS = 10_000L  // 10 seconds between polls
+        private const val STAGGER_DELAY_MS = 2_000L   // 2 second offset per inbox
+        private const val INITIAL_BACKOFF_MS = 2_000L
 
         fun start(context: Context, addresses: List<String>) {
             val intent = Intent(context, OtpPollingService::class.java)
@@ -60,8 +64,8 @@ class OtpPollingService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification("Monitoring inboxes..."))
 
         intent?.getStringArrayExtra(EXTRA_ADDRESSES)?.let { addresses ->
-            for (address in addresses) {
-                startPollingInbox(address)
+            for ((index, address) in addresses.withIndex()) {
+                startPollingInbox(address, index)
             }
             updateNotification("Monitoring ${addresses.size} inbox(es)...")
         }
@@ -69,15 +73,25 @@ class OtpPollingService : Service() {
         return START_STICKY
     }
 
-    private fun startPollingInbox(address: String) {
+    /**
+     * Start polling a specific inbox with stagger offset and retry on 429.
+     */
+    private fun startPollingInbox(address: String, inboxIndex: Int = 0) {
         pollingJobs[address]?.cancel()
         seenIds[address] = mutableSetOf()
 
+        // Stagger: offset each inbox's polling by STAGGER_DELAY_MS
+        val staggerOffset = inboxIndex * STAGGER_DELAY_MS
+
         pollingJobs[address] = serviceScope.launch {
+            delay(staggerOffset) // Stagger start to spread API calls
+
+            var consecutiveErrors = 0
             while (isActive) {
                 try {
                     val response = api.listEmails(address)
                     if (response.ok) {
+                        consecutiveErrors = 0
                         for (email in response.emails) {
                             val seen = seenIds[address] ?: mutableSetOf()
                             if (email.id !in seen) {
@@ -87,8 +101,14 @@ class OtpPollingService : Service() {
                             }
                         }
                     }
-                } catch (_: Exception) {}
-                delay(5000L)
+                } catch (e: Exception) {
+                    consecutiveErrors++
+                    // On 429 or network error, back off exponentially
+                    val backoff = INITIAL_BACKOFF_MS * (1L shl consecutiveErrors.coerceAtMost(4))
+                    delay(backoff)
+                    continue // Skip the normal delay, go straight to retry
+                }
+                delay(POLL_INTERVAL_MS)
             }
         }
     }

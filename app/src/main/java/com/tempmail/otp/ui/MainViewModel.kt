@@ -52,30 +52,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val pollingJobs = mutableMapOf<String, Job>()
     private val seenIds = mutableMapOf<String, MutableSet<String>>()
 
+    companion object {
+        private const val POLL_INTERVAL_MS = 10_000L  // 10 seconds between polls
+        private const val STAGGER_DELAY_MS = 2_000L   // 2 second offset per inbox
+        private const val MAX_RETRIES = 5
+        private const val INITIAL_BACKOFF_MS = 2_000L // 2 seconds initial backoff
+    }
+
     /**
-     * Create a new temp inbox, add it to the list, and start polling.
+     * Create a new temp inbox with retry + exponential backoff for HTTP 429.
      */
     fun createInbox() {
         viewModelScope.launch {
             _uiState.value = UiState.Error("Creating inbox...")
-            try {
-                val response = api.createInbox()
-                val address = response.address
-                if (response.ok && address != null) {
-                    val entry = InboxEntry(address = address)
-                    _inboxes.value = _inboxes.value + entry
-                    _activeIndex.value = _inboxes.value.size - 1
-                    // Copy the newly created email to clipboard
-                    ClipboardHelper.copyText(getApplication(), "Temp Email", address)
-                    _uiState.value = UiState.Ready(_inboxes.value, _activeIndex.value)
-                    // Start polling this inbox
-                    startPolling(address)
-                } else {
-                    _uiState.value = UiState.Error(response.error ?: "Failed to create inbox")
+            var lastError: String? = null
+
+            for (attempt in 0 until MAX_RETRIES) {
+                try {
+                    val response = api.createInbox()
+                    val address = response.address
+                    if (response.ok && address != null) {
+                        val entry = InboxEntry(address = address)
+                        _inboxes.value = _inboxes.value + entry
+                        _activeIndex.value = _inboxes.value.size - 1
+                        ClipboardHelper.copyText(getApplication(), "Temp Email", address)
+                        _uiState.value = UiState.Ready(_inboxes.value, _activeIndex.value)
+                        startPolling(address)
+                        return@launch
+                    } else {
+                        lastError = response.error ?: "Failed to create inbox"
+                    }
+                } catch (e: Exception) {
+                    lastError = e.message
+                    // If 429 or network error, wait with exponential backoff
+                    val backoff = INITIAL_BACKOFF_MS * (1L shl attempt) // 2s, 4s, 8s, 16s, 32s
+                    _uiState.value = UiState.Error("Rate limited, retrying in ${backoff / 1000}s...")
+                    delay(backoff)
                 }
-            } catch (e: Exception) {
-                _uiState.value = UiState.Error("Network error: ${e.message}")
             }
+
+            _uiState.value = UiState.Error(lastError ?: "Failed to create inbox after $MAX_RETRIES attempts")
         }
     }
 
@@ -86,7 +102,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (index < 0 || index >= _inboxes.value.size) return
         _activeIndex.value = index
         val active = _inboxes.value[index]
-        // Copy the selected email address to clipboard
         ClipboardHelper.copyText(getApplication(), "Temp Email", active.address)
         _uiState.value = UiState.Ready(_inboxes.value, index)
     }
@@ -102,18 +117,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Start polling a specific inbox every [intervalMs] milliseconds.
+     * Start polling a specific inbox.
+     * Uses longer interval + stagger to avoid HTTP 429 with multiple inboxes.
+     * Includes retry with backoff on 429.
      */
-    fun startPolling(address: String, intervalMs: Long = 5000L) {
-        // Cancel existing job for this address if any
+    fun startPolling(address: String) {
         pollingJobs[address]?.cancel()
         seenIds[address] = mutableSetOf()
 
+        // Stagger: offset each inbox's polling by STAGGER_DELAY_MS
+        val staggerOffset = (_inboxes.value.indexOfFirst { it.address == address }) * STAGGER_DELAY_MS
+
         pollingJobs[address] = viewModelScope.launch {
+            delay(staggerOffset) // Stagger start to spread API calls
+
+            var consecutiveErrors = 0
             while (isActive) {
                 try {
                     val response = api.listEmails(address)
                     if (response.ok) {
+                        consecutiveErrors = 0
                         updateInboxEmails(address, response.emails)
                         for (email in response.emails) {
                             val seen = seenIds[address] ?: mutableSetOf()
@@ -124,9 +147,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                     }
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    consecutiveErrors++
+                    // On 429 or network error, back off exponentially
+                    val backoff = (INITIAL_BACKOFF_MS * (1L shl consecutiveErrors.coerceAtMost(4)))
+                    delay(backoff)
+                    continue // Skip the normal delay, go straight to retry
                 }
-                delay(intervalMs)
+                delay(POLL_INTERVAL_MS)
             }
         }
     }
@@ -172,7 +200,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun onOtpFound(address: String, otp: String, from: String) {
-        // Update inbox entry with last OTP
         val current = _inboxes.value.toMutableList()
         val idx = current.indexOfFirst { it.address == address }
         if (idx >= 0) {
@@ -180,7 +207,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _inboxes.value = current
         }
 
-        // Only copy to clipboard if this is the active inbox
         if (_activeIndex.value < current.size && current[_activeIndex.value].address == address) {
             ClipboardHelper.copyText(getApplication(), "OTP Code", otp)
         }
@@ -194,25 +220,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return regex.find(text)?.groupValues?.get(1)
     }
 
-    /**
-     * Stop polling for a specific inbox.
-     */
     fun stopPolling(address: String) {
         pollingJobs[address]?.cancel()
         pollingJobs.remove(address)
     }
 
-    /**
-     * Stop all polling.
-     */
     fun stopAllPolling() {
         pollingJobs.values.forEach { it.cancel() }
         pollingJobs.clear()
     }
 
-    /**
-     * Delete an inbox from the list.
-     */
     fun deleteInbox(index: Int) {
         if (index < 0 || index >= _inboxes.value.size) return
         val current = _inboxes.value.toMutableList()
@@ -229,9 +246,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Get all inbox addresses for the foreground service.
-     */
     fun getAllAddresses(): List<String> = _inboxes.value.map { it.address }
 
     override fun onCleared() {
