@@ -9,112 +9,117 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Callback for WebSocket events from MailboxTemp.
- */
-interface WebSocketCallback {
-    /** Called when WebSocket connects successfully */
-    fun onConnected(address: String)
-
-    /** Called when a new email event is received via WebSocket */
-    fun onEmailEvent(address: String, emailSummary: EmailSummary)
-
-    /** Called when WebSocket disconnects */
-    fun onDisconnected(address: String)
-
-    /** Called when an error occurs */
-    fun onError(address: String, error: String)
-}
-
-/**
- * WebSocket client for MailboxTemp real-time email streaming.
- * Instead of polling every N seconds (which causes HTTP 429),
- * this opens a WebSocket connection to wss://mailboxtemp.com/ws/inbox?address=<address>
- * and receives push notifications when new emails arrive.
+ * Owns at most one WebSocket per inbox address.
  *
- * This completely eliminates 429 rate-limit errors from polling.
+ * Two fixes over the old implementation:
+ *  - connection state is only reported after the handshake (`onOpen`), not when the socket
+ *    object is created, so callers can trust [isOpen];
+ *  - every socket gets a generation id and callbacks from a replaced socket are ignored,
+ *    so a stale connection can never resurrect itself.
  */
 class MailboxWebSocketClient(
     private val client: OkHttpClient
 ) {
+
+    interface Listener {
+        fun onOpen(address: String)
+        fun onEmail(address: String, email: EmailSummary)
+        fun onClosed(address: String)
+        fun onFailure(address: String, error: String)
+    }
+
     private val moshi: Moshi = Moshi.Builder()
         .add(KotlinJsonAdapterFactory())
         .build()
 
-    private val activeSockets = mutableMapOf<String, WebSocket>()
+    private val generation = AtomicLong(0L)
+    private val sockets = ConcurrentHashMap<String, WebSocket>()
+    private val currentIds = ConcurrentHashMap<String, Long>()
+    private val openAddresses = ConcurrentHashMap.newKeySet<String>()
 
-    /**
-     * Open a WebSocket connection for a specific inbox address.
-     * New emails will be pushed to callback.onEmailEvent().
-     */
-    fun connect(address: String, callback: WebSocketCallback) {
-        // Close existing connection for this address if any
+    /** Connects [address], replacing any previous socket for the same inbox. */
+    fun connect(address: String, listener: Listener) {
         disconnect(address)
+
+        val id = generation.incrementAndGet()
+        currentIds[address] = id
 
         val request = Request.Builder()
             .url("wss://mailboxtemp.com/ws/inbox?address=$address")
             .build()
 
         val ws = client.newWebSocket(request, object : WebSocketListener() {
+            private fun isCurrent(): Boolean = currentIds[address] == id
+
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d("MailboxWS", "Connected to $address")
-                callback.onConnected(address)
+                if (!isCurrent()) return
+                openAddresses.add(address)
+                listener.onOpen(address)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                Log.d("MailboxWS", "Message from $address: $text")
-                handleMessage(address, text, callback)
+                if (!isCurrent()) return
+                handleMessage(address, text, listener)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                val text = bytes.utf8()
-                Log.d("MailboxWS", "Binary message from $address: $text")
-                handleMessage(address, text, callback)
+                if (!isCurrent()) return
+                handleMessage(address, bytes.utf8(), listener)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d("MailboxWS", "Closing $address: $code $reason")
                 webSocket.close(code, reason)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d("MailboxWS", "Closed $address: $code $reason")
-                activeSockets.remove(address)
-                callback.onDisconnected(address)
+                if (!isCurrent()) return
+                openAddresses.remove(address)
+                listener.onClosed(address)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e("MailboxWS", "Failure for $address", t)
-                activeSockets.remove(address)
-                callback.onError(address, t.message ?: "WebSocket error")
+                if (!isCurrent()) return
+                openAddresses.remove(address)
+                Log.w("MailboxWS", "Failure for $address", t)
+                listener.onFailure(address, t.message ?: "WebSocket error")
             }
         })
 
-        activeSockets[address] = ws
+        sockets[address] = ws
     }
 
+    /** Closes the socket for [address]; later callbacks from it are ignored. */
+    fun disconnect(address: String) {
+        currentIds.remove(address)
+        openAddresses.remove(address)
+        sockets.remove(address)?.close(1000, "Client disconnecting")
+    }
+
+    fun disconnectAll() {
+        for (address in sockets.keys) disconnect(address)
+    }
+
+    /** True only after the server accepted the handshake. */
+    fun isOpen(address: String): Boolean = openAddresses.contains(address)
+
     /**
-     * Parse incoming WebSocket message and dispatch to callback.
-     * Messages can be:
-     * - {"type":"connected"} — initial connection confirmation
-     * - {"type":"email","email":{...}} — new email arrived
-     * - Other types may exist; handle gracefully
+     * Parses a pushed message:
+     *  - `{"type":"connected"}` on open
+     *  - `{"type":"email","email":{...}}` (also tolerates `message`/`data` wrappers)
      */
-    private fun handleMessage(address: String, text: String, callback: WebSocketCallback) {
+    private fun handleMessage(address: String, text: String, listener: Listener) {
         try {
-            // Parse as generic Map to inspect type field
             @Suppress("UNCHECKED_CAST")
             val map = moshi.adapter(Map::class.java).fromJson(text) as? Map<String, Any?> ?: return
             val type = map["type"] as? String
 
             when (type) {
-                "connected" -> {
-                    // Already handled in onOpen callback
-                }
+                "connected" -> Unit
                 "email", "message", "new_email" -> {
-                    // Extract email data from the message
                     @Suppress("UNCHECKED_CAST")
                     val emailMap = map["email"] as? Map<String, Any?>
                         ?: map["message"] as? Map<String, Any?>
@@ -123,56 +128,21 @@ class MailboxWebSocketClient(
                     if (emailMap != null) {
                         val emailJson = moshi.adapter(Map::class.java).toJson(emailMap)
                         val email = moshi.adapter(EmailSummary::class.java).fromJson(emailJson)
-                        if (email != null) {
-                            callback.onEmailEvent(address, email)
-                        }
+                        if (email != null) listener.onEmail(address, email)
                     }
                 }
                 else -> {
-                    // Unknown message type — try to parse as email directly
+                    // Unknown type — try to read the frame as an email object.
                     try {
                         val email = moshi.adapter(EmailSummary::class.java).fromJson(text)
-                        if (email != null && email.id.isNotEmpty()) {
-                            callback.onEmailEvent(address, email)
-                        }
+                        if (email != null && email.id.isNotEmpty()) listener.onEmail(address, email)
                     } catch (_: Exception) {
-                        Log.d("MailboxWS", "Unknown message type: $type, text: $text")
+                        Log.d("MailboxWS", "Unknown message type: $type")
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e("MailboxWS", "Error parsing message from $address: ${e.message}", e)
+            Log.e("MailboxWS", "Error parsing message from $address", e)
         }
-    }
-
-    /**
-     * Disconnect WebSocket for a specific address.
-     */
-    fun disconnect(address: String) {
-        activeSockets[address]?.let { ws ->
-            ws.close(1000, "Client disconnecting")
-            activeSockets.remove(address)
-        }
-    }
-
-    /**
-     * Disconnect all active WebSockets.
-     */
-    fun disconnectAll() {
-        activeSockets.values.forEach { it.close(1000, "Client disconnecting") }
-        activeSockets.clear()
-    }
-
-    /**
-     * Check if a WebSocket is active for the given address.
-     */
-    fun isConnected(address: String): Boolean = activeSockets.containsKey(address)
-
-    /**
-     * Reconnect WebSocket for a specific address.
-     */
-    fun reconnect(address: String, callback: WebSocketCallback) {
-        disconnect(address)
-        connect(address, callback)
     }
 }

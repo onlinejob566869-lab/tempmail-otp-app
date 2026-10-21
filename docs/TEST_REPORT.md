@@ -9,7 +9,7 @@
 |---|---|---|
 | Compile + package debug APK | `./gradlew assembleDebug` | ✅ **PASS** (1m 44s first run, 11 MB APK) |
 | Full clean verification | `./gradlew clean assembleDebug testDebugUnitTest lintDebug --no-build-cache` | ✅ **PASS** — 52/52 tasks executed, no cache, 34 s |
-| JVM unit tests | `./gradlew testDebugUnitTest` | ✅ **PASS — 38/38**, 0 failures, 0 skipped |
+| JVM unit tests | `./gradlew testDebugUnitTest` | ✅ **PASS — 46/46**, 0 failures, 0 skipped |
 | Android lint | `./gradlew lintDebug` | ✅ **PASS — 0 errors, 10 warnings** |
 | Live API + WebSocket smoke | `./gradlew testDebugUnitTest -Plive` | ✅ **PASS** (1.5 s) |
 | Release APK | `./gradlew assembleRelease` | ⛔ **FAIL** — `Keystore file '/workspace/release-keystore.jks' not found for signing config 'release'` (the file is gitignored and absent) |
@@ -70,6 +70,14 @@ Batch A (v1.0.1) coverage:
 * countdown formatting — `1:05`, `1:00:00`, and `Expired` at/below zero
 * UTC day keys and the daily-quota reset on a new day
 * `InboxEntry.isExpired()` at, before and after the deadline; inboxes without a deadline never expire
+
+### `BulkCreateTest.kt` (5) · `NotificationIdsTest.kt` (3)
+Parallel-inbox coverage (Batch B / v1.1.0):
+
+* bulk plan never exceeds 10 at a time, the remaining daily quota, or the caller's cap
+* negative/zero requests create nothing; concurrency constant stays at 3
+* notification ids are deterministic, unique across the 10 parallel inboxes and kept in a
+  dedicated range so they cannot collide with the app's own notifications
 
 ### `app/src/test/java/com/tempmail/otp/LiveApiSmokeTest.kt` — 1 live test (opt-in)
 Excluded from the default task; runs the app's own `ApiClient`/`MailboxWebSocketClient` against the

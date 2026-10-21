@@ -2,7 +2,7 @@ package com.tempmail.otp
 
 import com.tempmail.otp.data.ApiClient
 import com.tempmail.otp.data.EmailSummary
-import com.tempmail.otp.data.WebSocketCallback
+import com.tempmail.otp.data.MailboxWebSocketClient
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -33,16 +33,16 @@ class LiveApiSmokeTest {
 
         val latch = CountDownLatch(1)
         var wsError: String? = null
-        ApiClient.webSocketClient.connect(address, object : WebSocketCallback {
-            override fun onConnected(address: String) {
+        ApiClient.webSocketClient.connect(address, object : MailboxWebSocketClient.Listener {
+            override fun onOpen(address: String) {
                 latch.countDown()
             }
 
-            override fun onEmailEvent(address: String, emailSummary: EmailSummary) = Unit
+            override fun onEmail(address: String, email: EmailSummary) = Unit
 
-            override fun onDisconnected(address: String) = Unit
+            override fun onClosed(address: String) = Unit
 
-            override fun onError(address: String, error: String) {
+            override fun onFailure(address: String, error: String) {
                 wsError = error
                 latch.countDown()
             }

@@ -210,7 +210,7 @@ concurrency limits, and nothing in the UI explains that.
 A real build/test pass was run on a provisioned JDK 17 + Android SDK 35 toolchain — see
 `docs/TEST_REPORT.md`. Outcome:
 
-* `assembleDebug` ✅, `testDebugUnitTest` ✅ 38/38, `lintDebug` ✅ 0 errors / 10 warnings.
+* `assembleDebug` ✅, `testDebugUnitTest` ✅ 46/46, `lintDebug` ✅ 0 errors / 10 warnings.
 * Live smoke test against the real MailboxTemp API ✅ (create inbox, list, WebSocket `connected` in 1.5 s).
 * **F-31 (no tests) is now addressed**: 21 JVM tests were added (models contract, OTP extraction,
   email-list merge, opt-in live smoke). CI still only assembles debug — wiring `testDebugUnitTest` into
@@ -223,6 +223,12 @@ A real build/test pass was run on a provisioned JDK 17 + Android SDK 35 toolchai
     refreshing after the first OTP.
   * Restore seeds `seenIds` from the initial fetch and only *displays* the newest code — no replay of
     notifications or clipboard writes.
+* **Batch B fixes applied** (F-05, F-06, F-10): a single `InboxMonitor` now owns every socket;
+  `MailboxWebSocketClient` reports state only after `onOpen` and ignores callbacks from replaced
+  sockets (generation ids); deleted/expired addresses are tombstoned. The foreground service no
+  longer connects sockets — it only keeps the process alive.
+* **Parallel inboxes (v1.1.0)**: bulk create up to 10 with concurrency 3, a horizontal dashboard with
+  live status per inbox, per-inbox notification ids, and "extend all".
 * **F-33 is partially addressed**: the duplicated private `extractOtpRegex` was replaced by
   `util/OtpExtractor.kt` used by both the ViewModel and the service; tests characterise its
   "first number wins" / "4-digit year" limitations.

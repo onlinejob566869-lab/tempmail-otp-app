@@ -12,6 +12,8 @@
 | CI | tests hooked onto `assembleDebug` (no workflow edit needed) |
 | Build | debug APK green; release still blocked by the missing keystore (F-18) |
 | **Batch A** | ✅ **done** — inbox TTL/countdown, Extend +10 min, 404 handling, 10/day quota UX (v1.0.1) |
+| **Batch B** | ✅ **done** — single socket owner (`InboxMonitor`), accurate `onOpen`-based state, delete/stop tombstones (v1.1.0) |
+| **Parallel 10** | ✅ **done** — `+10` bulk create, horizontal 10-inbox dashboard, per-inbox notifications, extend-all (v1.1.0) |
 
 ## Priority 1 — "app actually usable for more than 10 minutes"
 
@@ -81,7 +83,7 @@ These are the issues a real user hits in the first session.
 ## Suggested order of work
 
 1. ~~**Batch A (1.5 days):** #1 TTL + #2 daily-limit UX~~ ✅ **done in v1.0.1**
-2. **Batch B (2 days):** #3 single socket owner + #4 real connection state + #5 tombstones → reliable delivery.
+2. ~~**Batch B (2 days):** #3 single socket owner + #4 real connection state + #5 tombstones~~ ✅ **done in v1.1.0**
 3. **Batch C (1.5 days):** #6 service recovery + #7 Android 15 timeout + #9 error surfacing.
 4. **Batch D (1 day):** #11–#18 security/release hardening.
 5. **Batch E (2 days):** #19–#25 polish + #26–#29 tests.
