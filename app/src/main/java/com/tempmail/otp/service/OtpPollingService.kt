@@ -13,6 +13,7 @@ import com.tempmail.otp.data.ApiClient
 import com.tempmail.otp.data.EmailSummary
 import com.tempmail.otp.data.WebSocketCallback
 import com.tempmail.otp.util.NotificationHelper
+import com.tempmail.otp.util.OtpExtractor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -145,7 +146,7 @@ class OtpPollingService : Service() {
                     otp = detail.email?.otpCode
                     if (otp.isNullOrBlank()) {
                         val body = detail.email?.bodyText ?: detail.email?.bodyHtml ?: ""
-                        otp = extractOtpRegex(body)
+                        otp = OtpExtractor.extract(body)
                     }
                     if (!otp.isNullOrBlank()) {
                         NotificationHelper.showOtpNotification(
@@ -159,11 +160,6 @@ class OtpPollingService : Service() {
                 this@OtpPollingService, otp!!, email.fromAddress
             )
         }
-    }
-
-    private fun extractOtpRegex(text: String): String? {
-        val regex = Regex("\\b(\\d{4,8})\\b")
-        return regex.find(text)?.groupValues?.get(1)
     }
 
     private fun createChannel() {

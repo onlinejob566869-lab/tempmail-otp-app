@@ -202,3 +202,22 @@ concurrency limits, and nothing in the UI explains that.
 | `app/src/main/java/com/tempmail/otp/data/MailboxTempApi.kt` | 27 | Retrofit interface |
 | `app/src/main/java/com/tempmail/otp/util/NotificationHelper.kt` | 42 | OTP notifications |
 | `app/src/main/java/com/tempmail/otp/util/ClipboardHelper.kt` | 20 | Clipboard + Toast |
+
+---
+
+## 8. Verification update (2026-10-21)
+
+A real build/test pass was run on a provisioned JDK 17 + Android SDK 35 toolchain — see
+`docs/TEST_REPORT.md`. Outcome:
+
+* `assembleDebug` ✅, `testDebugUnitTest` ✅ 16/16, `lintDebug` ✅ 0 errors / 10 warnings.
+* Live smoke test against the real MailboxTemp API ✅ (create inbox, list, WebSocket `connected` in 1.5 s).
+* **F-31 (no tests) is now addressed**: 17 JVM tests were added (models contract, OTP extraction,
+  opt-in live smoke). CI still only assembles debug — wiring `testDebugUnitTest` into the workflow
+  remains open.
+* **F-33 is partially addressed**: the duplicated private `extractOtpRegex` was replaced by
+  `util/OtpExtractor.kt` used by both the ViewModel and the service; tests characterise its
+  "first number wins" / "4-digit year" limitations.
+* F-01 (Toast on the WS thread) was re-verified against AOSP `Toast.getLooper()`; it cannot be
+  reproduced without a device, so it stays source-verified rather than execution-verified.
+

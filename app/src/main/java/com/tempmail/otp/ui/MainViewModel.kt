@@ -9,6 +9,7 @@ import com.tempmail.otp.data.EmailSummary
 import com.tempmail.otp.data.WebSocketCallback
 import com.tempmail.otp.util.ClipboardHelper
 import com.tempmail.otp.util.NotificationHelper
+import com.tempmail.otp.util.OtpExtractor
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -331,7 +332,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     otp = detail.email?.otpCode
                     if (otp.isNullOrBlank()) {
                         val body = detail.email?.bodyText ?: detail.email?.bodyHtml ?: ""
-                        otp = extractOtpRegex(body)
+                        otp = OtpExtractor.extract(body)
                     }
                     if (!otp.isNullOrBlank()) {
                         onOtpFound(address, otp!!, email.fromAddress)
@@ -360,15 +361,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         saveState()
     }
 
-    private fun extractOtpRegex(text: String): String? {
-        val regex = Regex("\\b(\\d{4,8})\\b")
-        return regex.find(text)?.groupValues?.get(1)
-    }
-
     // ────────────────────────────────────────────────────────────
     //  Inbox management
     // ────────────────────────────────────────────────────────────
-
     fun stopWebSocket(address: String) {
         reconnectJobs[address]?.cancel()
         reconnectJobs.remove(address)
