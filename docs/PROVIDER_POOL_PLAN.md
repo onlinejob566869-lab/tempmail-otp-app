@@ -85,6 +85,7 @@ val credential: String? = null      // opaque, adapter-specific
 * prefs: `KEY_PROVIDER` / `KEY_CREDENTIAL`, line format `address<TAB>value`.
 * **Migration:** existing entries without these keys default to `mailboxtemp` (no data loss).
 * Credentials are not bearer tokens for mail.tm/mail.gw (the address is the credential, as today),
+  but TempMailGrab's API key **is** — see §6.
 
 ---
 
@@ -193,5 +194,3 @@ release can ship before TempMailGrab/mail.gw.
 4. **API key storage:** encrypted prefs (`security-crypto`, adds ~50 KB) — OK?
 5. **Guerrilla Mail:** skip (unpublished limits) — confirm.
 6. **Release target:** ship after M2 (mail.tm only, ~2.25 d) or wait for the full pool (~3.75 d)?
-
-  but TempMailGrab's API key **is** — see §6.
