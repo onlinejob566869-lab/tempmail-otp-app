@@ -1,0 +1,29 @@
+From 89b6336cf24dd5ea2d2cb6cf349e275243a405f4 Mon Sep 17 00:00:00 2001
+From: "cline-cloud[bot]" <cline-cloud[bot]@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 10:53:23 +0000
+Subject: [PATCH] Fix invalid YAML in build-apk workflow (duplicate list marker
+ broke parsing)
+
+---
+ .github/workflows/build-apk.yml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/build-apk.yml b/.github/workflows/build-apk.yml
+index 619ad8b..4710122 100644
+--- a/.github/workflows/build-apk.yml
++++ b/.github/workflows/build-apk.yml
+@@ -25,9 +25,9 @@ jobs:
+     - name: Grant execute permission for gradlew
+       run: chmod +x gradlew
+ 
+-    -     - name: Build debug APK and run unit tests
++    - name: Build debug APK and run unit tests
+       run: ./gradlew assembleDebug testDebugUnitTest --no-daemon --console=plain
+-      
++
+     - name: Upload APK artifact
+       uses: actions/upload-artifact@v4
+       with:
+-- 
+2.39.5
+
