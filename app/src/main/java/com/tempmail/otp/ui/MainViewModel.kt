@@ -8,6 +8,7 @@ import com.tempmail.otp.data.ApiClient
 import com.tempmail.otp.data.EmailSummary
 import com.tempmail.otp.data.WebSocketCallback
 import com.tempmail.otp.util.ClipboardHelper
+import com.tempmail.otp.util.EmailList
 import com.tempmail.otp.util.NotificationHelper
 import com.tempmail.otp.util.OtpExtractor
 import kotlinx.coroutines.Job
@@ -35,7 +36,6 @@ data class InboxEntry(
 sealed class UiState {
     data object Idle : UiState()
     data class Ready(val inboxes: List<InboxEntry>, val activeIndex: Int) : UiState()
-    data class OtpFound(val address: String, val otp: String, val from: String) : UiState()
     data class Error(val message: String) : UiState()
 }
 
@@ -209,25 +209,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // WebSocket connected — emails will be pushed
             }
 
+            // OkHttp delivers these on a reader thread with no Looper. Move all state
+            // work to the main thread so clipboard/Toast/state updates are safe (F-01).
             override fun onEmailEvent(addr: String, email: EmailSummary) {
-                val seen = seenIds[addr] ?: mutableSetOf()
-                if (email.id !in seen) {
-                    seen.add(email.id)
-                    seenIds[addr] = seen
-                    handleNewEmail(addr, email)
-                }
+                viewModelScope.launch { handleWsEmail(addr, email) }
             }
 
             override fun onDisconnected(addr: String) {
                 // Auto-reconnect with backoff
-                scheduleReconnect(addr)
+                viewModelScope.launch { scheduleReconnect(addr) }
             }
 
             override fun onError(addr: String, error: String) {
                 // Auto-reconnect with backoff
-                scheduleReconnect(addr)
+                viewModelScope.launch { scheduleReconnect(addr) }
             }
         })
+    }
+
+    /**
+     * Handle a pushed email: dedupe, add it to the visible list, then look for an OTP.
+     */
+    private fun handleWsEmail(address: String, email: EmailSummary) {
+        val seen = seenIds[address] ?: mutableSetOf()
+        if (!seen.add(email.id)) return
+        seenIds[address] = seen
+
+        addOrUpdateEmail(address, email)
+        handleNewEmail(address, email)
     }
 
     /**
@@ -259,16 +268,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val response = api.listEmails(address)
-                if (response.ok) {
-                    updateInboxEmails(address, response.emails)
-                    for (email in response.emails) {
-                        val seen = seenIds[address] ?: mutableSetOf()
-                        if (email.id !in seen) {
-                            seen.add(email.id)
-                            seenIds[address] = seen
-                            handleNewEmail(address, email)
-                        }
-                    }
+                if (!response.ok) return@launch
+
+                updateInboxEmails(address, response.emails)
+
+                // Seed the dedupe set: these messages already existed, so they must not be
+                // replayed as notifications or written to the clipboard on every launch (F-04).
+                val seen = seenIds[address] ?: mutableSetOf()
+                seen.addAll(response.emails.map { it.id })
+                seenIds[address] = seen
+
+                // Show the newest known code on screen only — no notification, no copy.
+                EmailList.newestOtp(response.emails)?.let { newest ->
+                    setLastOtp(address, newest.otpCode!!, newest.fromAddress)
                 }
             } catch (_: Exception) {}
         }
@@ -305,7 +317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ────────────────────────────────────────────────────────────
 
     /**
-     * Update the email list for a specific inbox in state.
+     * Replace the whole email list for an inbox (initial fetch / refresh).
      */
     private fun updateInboxEmails(address: String, emails: List<EmailSummary>) {
         val current = _inboxes.value.toMutableList()
@@ -313,10 +325,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (idx >= 0) {
             current[idx] = current[idx].copy(emails = emails)
             _inboxes.value = current
-            if (_uiState.value is UiState.Ready) {
-                _uiState.value = UiState.Ready(current, _activeIndex.value)
-            }
+            publishReady(current)
         }
+    }
+
+    /**
+     * Prepend a pushed email so the inbox list updates live (F-02).
+     */
+    private fun addOrUpdateEmail(address: String, email: EmailSummary) {
+        val current = _inboxes.value.toMutableList()
+        val idx = current.indexOfFirst { it.address == address }
+        if (idx < 0) return
+        current[idx] = current[idx].copy(
+            emails = EmailList.merge(current[idx].emails, email)
+        )
+        _inboxes.value = current
+        publishReady(current)
+    }
+
+    /**
+     * Keep the screen on the live inbox list. Previously list updates were dropped unless
+     * the state was exactly Ready, which froze the UI after the first OTP (F-03).
+     */
+    private fun publishReady(inboxes: List<InboxEntry> = _inboxes.value) {
+        if (inboxes.isNotEmpty()) {
+            _uiState.value = UiState.Ready(inboxes, _activeIndex.value)
+        }
+    }
+
+    /** Store the last OTP without the copy/notify side effects of [onOtpFound]. */
+    private fun setLastOtp(address: String, otp: String, from: String) {
+        val current = _inboxes.value.toMutableList()
+        val idx = current.indexOfFirst { it.address == address }
+        if (idx < 0) return
+        current[idx] = current[idx].copy(lastOtp = otp, lastOtpFrom = from)
+        _inboxes.value = current
+        publishReady(current)
+        saveState()
     }
 
     /**
@@ -357,7 +402,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         NotificationHelper.showOtpNotification(getApplication(), otp, from)
-        _uiState.value = UiState.OtpFound(address, otp, from)
+        _uiState.value = UiState.Ready(current, _activeIndex.value)
         saveState()
     }
 

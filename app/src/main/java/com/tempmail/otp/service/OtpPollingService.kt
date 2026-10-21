@@ -54,7 +54,9 @@ class OtpPollingService : Service() {
 
     private val api = ApiClient.api
     private val wsClient = ApiClient.webSocketClient
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Single-threaded (main) scope: WebSocket callbacks arrive on OkHttp threads, so all
+    // state changes are serialised here instead of racing on Dispatchers.IO.
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val seenIds = mutableMapOf<String, MutableSet<String>>()
     private val reconnectJobs = mutableMapOf<String, Job>()
 
@@ -99,20 +101,22 @@ class OtpPollingService : Service() {
             }
 
             override fun onEmailEvent(addr: String, email: EmailSummary) {
-                val seen = seenIds[addr] ?: mutableSetOf()
-                if (email.id !in seen) {
-                    seen.add(email.id)
-                    seenIds[addr] = seen
-                    handleNewEmail(addr, email)
+                serviceScope.launch {
+                    val seen = seenIds[addr] ?: mutableSetOf()
+                    if (email.id !in seen) {
+                        seen.add(email.id)
+                        seenIds[addr] = seen
+                        handleNewEmail(addr, email)
+                    }
                 }
             }
 
             override fun onDisconnected(addr: String) {
-                scheduleReconnect(addr)
+                serviceScope.launch { scheduleReconnect(addr) }
             }
 
             override fun onError(addr: String, error: String) {
-                scheduleReconnect(addr)
+                serviceScope.launch { scheduleReconnect(addr) }
             }
         })
     }

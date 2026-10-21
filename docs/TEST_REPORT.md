@@ -9,7 +9,7 @@
 |---|---|---|
 | Compile + package debug APK | `./gradlew assembleDebug` | ✅ **PASS** (1m 44s first run, 11 MB APK) |
 | Full clean verification | `./gradlew clean assembleDebug testDebugUnitTest lintDebug --no-build-cache` | ✅ **PASS** — 52/52 tasks executed, no cache, 34 s |
-| JVM unit tests | `./gradlew testDebugUnitTest` | ✅ **PASS — 16/16**, 0 failures, 0 skipped |
+| JVM unit tests | `./gradlew testDebugUnitTest` | ✅ **PASS — 21/21**, 0 failures, 0 skipped |
 | Android lint | `./gradlew lintDebug` | ✅ **PASS — 0 errors, 10 warnings** |
 | Live API + WebSocket smoke | `./gradlew testDebugUnitTest -Plive` | ✅ **PASS** (1.5 s) |
 | Release APK | `./gradlew assembleRelease` | ⛔ **FAIL** — `Keystore file '/workspace/release-keystore.jks' not found for signing config 'release'` (the file is gitignored and absent) |
@@ -52,6 +52,16 @@ Covers the extracted `OtpExtractor` (previously duplicated privately in the View
 * characterises the known limitations: **the first number wins**, and a 4-digit **year is accepted**
 
 **Proves:** the fallback extraction works for normal OTPs, and quantifies its false-positive risk.
+
+### `app/src/test/java/com/tempmail/otp/util/EmailListTest.kt` — 5 tests
+Covers the list logic behind the F-02 fix:
+
+* a pushed email is prepended (newest first)
+* a duplicate id is ignored and the original list is returned untouched
+* the list is capped at 50, keeping the newest entries
+* `newestOtp` picks the first (newest) message that has a code, and returns null when none does
+
+**Proves:** the live inbox list update cannot duplicate or grow without bound.
 
 ### `app/src/test/java/com/tempmail/otp/LiveApiSmokeTest.kt` — 1 live test (opt-in)
 Excluded from the default task; runs the app's own `ApiClient`/`MailboxWebSocketClient` against the

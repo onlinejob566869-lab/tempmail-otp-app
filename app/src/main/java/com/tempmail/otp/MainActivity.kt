@@ -142,16 +142,6 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
                     )
                 }
             }
-            is UiState.OtpFound -> {
-                if (inboxes.isNotEmpty() && activeIndex < inboxes.size) {
-                    val active = inboxes[activeIndex]
-                    ActiveInboxContent(
-                        inbox = active,
-                        viewModel = viewModel,
-                        context = context
-                    )
-                }
-            }
             is UiState.Error -> {
                 if (inboxes.isNotEmpty()) {
                     val active = inboxes[activeIndex]

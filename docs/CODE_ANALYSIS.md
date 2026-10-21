@@ -210,11 +210,19 @@ concurrency limits, and nothing in the UI explains that.
 A real build/test pass was run on a provisioned JDK 17 + Android SDK 35 toolchain — see
 `docs/TEST_REPORT.md`. Outcome:
 
-* `assembleDebug` ✅, `testDebugUnitTest` ✅ 16/16, `lintDebug` ✅ 0 errors / 10 warnings.
+* `assembleDebug` ✅, `testDebugUnitTest` ✅ 21/21, `lintDebug` ✅ 0 errors / 10 warnings.
 * Live smoke test against the real MailboxTemp API ✅ (create inbox, list, WebSocket `connected` in 1.5 s).
-* **F-31 (no tests) is now addressed**: 17 JVM tests were added (models contract, OTP extraction,
-  opt-in live smoke). CI still only assembles debug — wiring `testDebugUnitTest` into the workflow
-  remains open.
+* **F-31 (no tests) is now addressed**: 21 JVM tests were added (models contract, OTP extraction,
+  email-list merge, opt-in live smoke). CI still only assembles debug — wiring `testDebugUnitTest` into
+  the workflow remains open; as a workaround the tests are hooked onto `assembleDebug`.
+* **P0 fixes applied** (F-01, F-02, F-03, F-04):
+  * WS callbacks are marshalled to the main dispatcher and `ClipboardHelper` posts to the main looper,
+    so the `Toast`-on-reader-thread crash is gone.
+  * Pushed emails are prepended to the visible list (`EmailList.merge`, deduped, capped at 50).
+  * List updates no longer require `UiState.Ready`; `UiState.OtpFound` was removed, so the UI keeps
+    refreshing after the first OTP.
+  * Restore seeds `seenIds` from the initial fetch and only *displays* the newest code — no replay of
+    notifications or clipboard writes.
 * **F-33 is partially addressed**: the duplicated private `extractOtpRegex` was replaced by
   `util/OtpExtractor.kt` used by both the ViewModel and the service; tests characterise its
   "first number wins" / "4-digit year" limitations.
