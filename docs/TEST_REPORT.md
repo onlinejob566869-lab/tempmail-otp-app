@@ -8,10 +8,11 @@
 | Check | Command | Result |
 |---|---|---|
 | Compile + package debug APK | `./gradlew assembleDebug` | ✅ **PASS** (1m 44s first run, 11 MB APK) |
+| Full clean verification | `./gradlew clean assembleDebug testDebugUnitTest lintDebug --no-build-cache` | ✅ **PASS** — 52/52 tasks executed, no cache, 34 s |
 | JVM unit tests | `./gradlew testDebugUnitTest` | ✅ **PASS — 16/16**, 0 failures, 0 skipped |
 | Android lint | `./gradlew lintDebug` | ✅ **PASS — 0 errors, 10 warnings** |
 | Live API + WebSocket smoke | `./gradlew testDebugUnitTest -Plive` | ✅ **PASS** (1.5 s) |
-| Release APK | `./gradlew assembleRelease` | ⛔ Not runnable — `app/build.gradle.kts` points at `release-keystore.jks`, which is gitignored and absent |
+| Release APK | `./gradlew assembleRelease` | ⛔ **FAIL** — `Keystore file '/workspace/release-keystore.jks' not found for signing config 'release'` (the file is gitignored and absent) |
 | On-device UI / notifications / clipboard / FGS | instrumented tests | ⛔ Not possible here — no `/dev/kvm`, so no emulator; no physical device attached |
 
 ## APK inspection (`aapt2 dump badging`)
@@ -73,6 +74,14 @@ access, JSON shapes and the WebSocket handshake all work as the app assumes.
    and `ClipboardHelper.copyText` calls `Toast.show()` from the OkHttp WebSocket callback thread.
    This cannot be reproduced without a device/emulator, so it is verified by source + call-path, not
    by execution.
+
+## CI
+
+The GitHub App integration available here has no `workflows` permission, so `.github/workflows/build-apk.yml`
+could not be modified or dispatched from this environment (`HTTP 403`). The workflow is unchanged and
+still only assembles the debug APK — wiring `testDebugUnitTest` into it is an open recommendation.
+The local run used the same JDK 17 / Gradle 8.10.2 / AGP 8.7.0 / SDK 35 as the GitHub runner, and the
+base commit `982ea6b` is green in CI (run `38854068942`).
 
 ## What this does **not** verify
 
