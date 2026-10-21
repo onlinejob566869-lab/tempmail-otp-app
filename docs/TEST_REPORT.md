@@ -78,9 +78,11 @@ access, JSON shapes and the WebSocket handshake all work as the app assumes.
 ## CI
 
 The GitHub App integration available here has no `workflows` permission, so `.github/workflows/build-apk.yml`
-could not be modified or dispatched from this environment (`HTTP 403`). The workflow is unchanged and
-still only assembles the debug APK — wiring `testDebugUnitTest` into it is an open recommendation.
-The local run used the same JDK 17 / Gradle 8.10.2 / AGP 8.7.0 / SDK 35 as the GitHub runner, and the
+cannot be modified from this environment (`HTTP 403`, and `workflow_dispatch` is blocked too).
+Instead, the unit tests are wired into the `assembleDebug` task in `app/build.gradle.kts`, so the
+**existing, unmodified** CI step (`./gradlew assembleDebug`) now runs them automatically. Verified with
+the exact CI command and no build cache: `42/42 tasks executed`, tests ran, build successful.
+The local runs used the same JDK 17 / Gradle 8.10.2 / AGP 8.7.0 / SDK 35 as the GitHub runner, and the
 base commit `982ea6b` is green in CI (run `38854068942`).
 
 ## What this does **not** verify

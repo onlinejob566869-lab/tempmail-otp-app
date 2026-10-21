@@ -101,3 +101,12 @@ tasks.withType<Test>().configureEach {
         exclude("**/LiveApiSmokeTest*")
     }
 }
+
+// The CI workflow is protected (the GitHub App used by this workspace cannot modify
+// .github/workflows/*), and it only runs `assembleDebug`. Hooking the unit tests onto that
+// task keeps them in the CI loop without touching the workflow file.
+tasks.configureEach {
+    if (name == "assembleDebug") {
+        dependsOn("testDebugUnitTest")
+    }
+}
