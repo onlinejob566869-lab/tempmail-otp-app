@@ -2,13 +2,16 @@ package com.tempmail.otp.ui
 
 import android.app.Application
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tempmail.otp.data.ApiClient
 import com.tempmail.otp.data.EmailSummary
 import com.tempmail.otp.data.WebSocketCallback
 import com.tempmail.otp.util.ClipboardHelper
+import com.tempmail.otp.util.DailyLimit
 import com.tempmail.otp.util.EmailList
+import com.tempmail.otp.util.InboxClock
 import com.tempmail.otp.util.NotificationHelper
 import com.tempmail.otp.util.OtpExtractor
 import kotlinx.coroutines.Job
@@ -18,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import retrofit2.HttpException
 
 /**
  * Represents one temp email inbox.
@@ -27,8 +31,13 @@ data class InboxEntry(
     val label: String = address.substringBefore("@").take(12),
     val emails: List<EmailSummary> = emptyList(),
     val lastOtp: String? = null,
-    val lastOtpFrom: String? = null
-)
+    val lastOtpFrom: String? = null,
+    /** Epoch millis at which the inbox is purged; null when the server did not say. */
+    val expiresAt: Long? = null
+) {
+    fun isExpired(now: Long = System.currentTimeMillis()): Boolean =
+        expiresAt != null && expiresAt <= now
+}
 
 /**
  * UI state for the app.
@@ -53,10 +62,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _activeIndex = MutableStateFlow(0)
     val activeIndex: StateFlow<Int> = _activeIndex.asStateFlow()
 
+    /** Inboxes created today (UTC) — free tier allows 10 per day. */
+    private val _creationsToday = MutableStateFlow(0)
+    val creationsToday: StateFlow<Int> = _creationsToday.asStateFlow()
+    val dailyLimit: Int = DailyLimit.FREE_DAILY_LIMIT
+
+    /** Transient user-facing message (quota, extend result, expired inbox, ...). */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
+
     private val seenIds = mutableMapOf<String, MutableSet<String>>()
     private val reconnectJobs = mutableMapOf<String, Job>()
 
+    /** Addresses that must not reconnect: deleted by the user, or expired and dropped. */
+    private val stoppedAddresses = mutableSetOf<String>()
+    private var noticeJob: Job? = null
+
     companion object {
+        private const val TAG = "MainViewModel"
         private const val MAX_RETRIES = 5
         private const val INITIAL_BACKOFF_MS = 2_000L
 
@@ -65,10 +88,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_OTPS = "inbox_otps"
         private const val KEY_OTP_SOURCES = "inbox_otp_sources"
         private const val KEY_ACTIVE_INDEX = "active_index"
+        private const val KEY_EXPIRES = "inbox_expires"
+        private const val KEY_CREATION_DAY = "creation_day"
+        private const val KEY_CREATION_COUNT = "creation_count"
     }
 
     init {
         restoreState()
+        watchExpiries()
     }
 
     // ────────────────────────────────────────────────────────────
@@ -100,13 +127,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val parts = it.split("\t", limit = 2)
                 (parts[0]) to (parts.getOrElse(1) { "" })
             }
+        val expiresMap = (sp.getString(KEY_EXPIRES, "") ?: "").split("\n")
+            .filter { it.isNotBlank() }
+            .mapNotNull {
+                val parts = it.split("\t", limit = 2)
+                val millis = parts.getOrNull(1)?.toLongOrNull()
+                if (parts.isNotEmpty() && millis != null) parts[0] to millis else null
+            }
+            .toMap()
         val savedActive = sp.getInt(KEY_ACTIVE_INDEX, 0)
+
+        // Quota resets automatically when the stored UTC day is not today.
+        _creationsToday.value = DailyLimit.usedToday(
+            System.currentTimeMillis(),
+            sp.getString(KEY_CREATION_DAY, null),
+            sp.getInt(KEY_CREATION_COUNT, 0)
+        )
 
         val restored = addrList.map { addr ->
             InboxEntry(
                 address = addr,
                 lastOtp = otpMap[addr]?.takeIf { it.isNotBlank() },
-                lastOtpFrom = otpSourceMap[addr]?.takeIf { it.isNotBlank() }
+                lastOtpFrom = otpSourceMap[addr]?.takeIf { it.isNotBlank() },
+                expiresAt = expiresMap[addr]
             )
         }
 
@@ -114,12 +157,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _inboxes.value = restored
             _activeIndex.value = savedActive.coerceIn(0, restored.size - 1)
             _uiState.value = UiState.Ready(restored, _activeIndex.value)
-            // Reconnect WebSocket for each restored inbox (staggered)
             restored.forEachIndexed { index, entry ->
-                startWebSocket(entry.address, index)
+                if (entry.isExpired()) {
+                    // Purged server-side: no socket, no fetch, no reconnect.
+                    stoppedAddresses.add(entry.address)
+                } else {
+                    startWebSocket(entry.address, index)
+                    initialFetch(entry.address)
+                }
             }
-            // Also do one initial fetch to get any emails that arrived while app was closed
-            restored.forEach { initialFetch(it.address) }
         }
     }
 
@@ -135,10 +181,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val otpSources = _inboxes.value
             .filter { !it.lastOtpFrom.isNullOrBlank() }
             .joinToString("\n") { "${it.address}\t${it.lastOtpFrom}" }
+        val expires = _inboxes.value
+            .filter { it.expiresAt != null }
+            .joinToString("\n") { "${it.address}\t${it.expiresAt}" }
         sp.edit()
             .putString(KEY_ADDRESSES, addresses)
             .putString(KEY_OTPS, otps)
             .putString(KEY_OTP_SOURCES, otpSources)
+            .putString(KEY_EXPIRES, expires)
             .putInt(KEY_ACTIVE_INDEX, _activeIndex.value)
             .apply()
     }
@@ -148,10 +198,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ────────────────────────────────────────────────────────────
 
     /**
-     * Create a new temp inbox with retry + exponential backoff for HTTP 429.
-     * After creation, opens a WebSocket for real-time email push (no polling).
+     * Create a new temp inbox. Stops early on the free-tier daily quota or on HTTP 429 —
+     * retrying a non-recoverable limit only wastes time.
      */
     fun createInbox() {
+        refreshQuota()
+        if (_creationsToday.value >= dailyLimit) {
+            showNotice("Aaj ki $dailyLimit inbox limit puri ho gayi. Kal naya bana sakte ho (ya Pro plan).")
+            return
+        }
+
         viewModelScope.launch {
             _uiState.value = UiState.Error("Creating inbox...")
             var lastError: String? = null
@@ -161,28 +217,153 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val response = api.createInbox()
                     val address = response.address
                     if (response.ok && address != null) {
-                        val entry = InboxEntry(address = address)
+                        // Server tells us when the inbox dies; fall back to 60 minutes.
+                        val expiresAt = InboxClock.parseExpiry(response.expires)
+                            ?: (System.currentTimeMillis() + InboxClock.FREE_LIFETIME_MS)
+                        val entry = InboxEntry(address = address, expiresAt = expiresAt)
+                        stoppedAddresses.remove(address)
                         _inboxes.value = _inboxes.value + entry
                         _activeIndex.value = _inboxes.value.size - 1
                         ClipboardHelper.copyText(getApplication(), "Temp Email", address)
                         _uiState.value = UiState.Ready(_inboxes.value, _activeIndex.value)
+                        registerCreation()
                         saveState()
-                        // Start WebSocket for real-time email push
                         startWebSocket(address, _inboxes.value.size - 1)
                         return@launch
-                    } else {
-                        lastError = response.error ?: "Failed to create inbox"
                     }
+
+                    // ok=false is a per-request rejection; retrying it cannot succeed.
+                    lastError = response.error ?: "Failed to create inbox"
+                    break
+                } catch (e: HttpException) {
+                    if (e.code() == 429) {
+                        Log.w(TAG, "Inbox creation rate limited", e)
+                        showNotice("Rate limit: free tier me 10 inbox/day aur 20/min. Thodi der baad try karo.")
+                        restoreUiAfterFailure()
+                        return@launch
+                    }
+                    lastError = "Server error ${e.code()}"
+                    delay(INITIAL_BACKOFF_MS * (1L shl attempt))
                 } catch (e: Exception) {
+                    Log.w(TAG, "Inbox creation failed", e)
                     lastError = e.message
                     val backoff = INITIAL_BACKOFF_MS * (1L shl attempt)
-                    _uiState.value = UiState.Error("Rate limited, retrying in ${backoff / 1000}s...")
+                    _uiState.value = UiState.Error("Network error, retrying in ${backoff / 1000}s...")
                     delay(backoff)
                 }
             }
 
             _uiState.value = UiState.Error(lastError ?: "Failed to create inbox after $MAX_RETRIES attempts")
         }
+    }
+
+    private fun restoreUiAfterFailure() {
+        if (_inboxes.value.isEmpty()) {
+            _uiState.value = UiState.Error("Could not create an inbox. Free tier allows 10 per day.")
+        } else {
+            publishReady()
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────
+    //  Expiry & quota
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * Extends a live inbox by 10 minutes. The API ignores this for an expired inbox,
+     * so the UI only offers it while the countdown is running.
+     */
+    fun extendInbox(address: String) {
+        viewModelScope.launch {
+            try {
+                val response = api.extendInbox(address)
+                if (!response.ok) {
+                    showNotice("Extend failed: ${response.error ?: "unknown error"}")
+                    return@launch
+                }
+                val current = _inboxes.value.toMutableList()
+                val idx = current.indexOfFirst { it.address == address }
+                if (idx >= 0) {
+                    val base = maxOf(current[idx].expiresAt ?: 0L, System.currentTimeMillis())
+                    current[idx] = current[idx].copy(expiresAt = base + InboxClock.EXTEND_MS)
+                    _inboxes.value = current
+                    publishReady(current)
+                    saveState()
+                    if (address in stoppedAddresses) startWebSocket(address)
+                    showNotice("Inbox extended by 10 minutes.")
+                }
+            } catch (e: HttpException) {
+                if (e.code() == 404) {
+                    markExpired(address)
+                } else {
+                    showNotice("Extend failed (HTTP ${e.code()})")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Extend failed", e)
+                showNotice("Extend failed: ${e.message ?: "network error"}")
+            }
+        }
+    }
+
+    /** Stops the socket and marks the inbox dead (server purged it). */
+    private fun markExpired(address: String, notify: Boolean = true) {
+        stopWebSocket(address)
+        val current = _inboxes.value.toMutableList()
+        val idx = current.indexOfFirst { it.address == address }
+        if (idx >= 0 && !current[idx].isExpired()) {
+            current[idx] = current[idx].copy(expiresAt = System.currentTimeMillis())
+            _inboxes.value = current
+            publishReady(current)
+            saveState()
+        }
+        if (notify) showNotice("Inbox expired. Create a new one to keep receiving mail.")
+    }
+
+    /** Watches the countdown so expired inboxes stop reconnecting. */
+    private fun watchExpiries() {
+        viewModelScope.launch {
+            while (isActive) {
+                delay(15_000L)
+                val now = System.currentTimeMillis()
+                val expired = _inboxes.value.filter {
+                    it.isExpired(now) && it.address !in stoppedAddresses
+                }
+                expired.forEach { markExpired(it.address, notify = false) }
+            }
+        }
+    }
+
+    private fun registerCreation() {
+        val count = _creationsToday.value + 1
+        _creationsToday.value = count
+        prefs().edit()
+            .putString(KEY_CREATION_DAY, DailyLimit.dayKey())
+            .putInt(KEY_CREATION_COUNT, count)
+            .apply()
+    }
+
+    /** Re-reads the quota so a UTC day rollover while the app is open resets it. */
+    private fun refreshQuota() {
+        val sp = prefs()
+        _creationsToday.value = DailyLimit.usedToday(
+            System.currentTimeMillis(),
+            sp.getString(KEY_CREATION_DAY, null),
+            sp.getInt(KEY_CREATION_COUNT, 0)
+        )
+    }
+
+    private fun showNotice(message: String) {
+        _notice.value = message
+        noticeJob?.cancel()
+        noticeJob = viewModelScope.launch {
+            delay(6_000L)
+            _notice.value = null
+        }
+    }
+
+    fun dismissNotice() {
+        noticeJob?.cancel()
+        _notice.value = null
     }
 
     // ────────────────────────────────────────────────────────────
@@ -194,6 +375,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Reconnection with backoff happens automatically on disconnect.
      */
     fun startWebSocket(address: String, inboxIndex: Int = 0) {
+        stoppedAddresses.remove(address)
         // Stagger WebSocket connections to avoid burst
         val staggerMs = inboxIndex * 1_000L
 
@@ -204,6 +386,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun connectWebSocket(address: String) {
+        if (address in stoppedAddresses) return
         wsClient.connect(address, object : WebSocketCallback {
             override fun onConnected(addr: String) {
                 // WebSocket connected — emails will be pushed
@@ -243,6 +426,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Schedule WebSocket reconnection with exponential backoff.
      */
     private fun scheduleReconnect(address: String) {
+        if (address in stoppedAddresses) return
         reconnectJobs[address]?.cancel()
         reconnectJobs[address] = viewModelScope.launch {
             var attempt = 0
@@ -266,6 +450,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun initialFetch(address: String) {
         viewModelScope.launch {
+            val entry = _inboxes.value.firstOrNull { it.address == address }
+            if (entry?.isExpired() == true) {
+                markExpired(address, notify = false)
+                return@launch
+            }
             try {
                 val response = api.listEmails(address)
                 if (!response.ok) return@launch
@@ -282,7 +471,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 EmailList.newestOtp(response.emails)?.let { newest ->
                     setLastOtp(address, newest.otpCode!!, newest.fromAddress)
                 }
-            } catch (_: Exception) {}
+            } catch (e: HttpException) {
+                if (e.code() == 404) {
+                    markExpired(address)
+                } else {
+                    Log.w(TAG, "Initial fetch failed for $address", e)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Initial fetch failed for $address", e)
+            }
         }
     }
 
@@ -382,7 +579,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!otp.isNullOrBlank()) {
                         onOtpFound(address, otp!!, email.fromAddress)
                     }
-                } catch (_: Exception) {}
+                } catch (e: HttpException) {
+                    if (e.code() == 404) {
+                        markExpired(address)
+                    } else {
+                        Log.w(TAG, "Email detail failed for $address", e)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Email detail failed for $address", e)
+                }
             }
         } else {
             onOtpFound(address, otp!!, email.fromAddress)
@@ -410,6 +615,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     //  Inbox management
     // ────────────────────────────────────────────────────────────
     fun stopWebSocket(address: String) {
+        stoppedAddresses.add(address)
         reconnectJobs[address]?.cancel()
         reconnectJobs.remove(address)
         wsClient.disconnect(address)

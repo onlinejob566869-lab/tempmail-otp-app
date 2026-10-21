@@ -210,7 +210,7 @@ concurrency limits, and nothing in the UI explains that.
 A real build/test pass was run on a provisioned JDK 17 + Android SDK 35 toolchain — see
 `docs/TEST_REPORT.md`. Outcome:
 
-* `assembleDebug` ✅, `testDebugUnitTest` ✅ 21/21, `lintDebug` ✅ 0 errors / 10 warnings.
+* `assembleDebug` ✅, `testDebugUnitTest` ✅ 38/38, `lintDebug` ✅ 0 errors / 10 warnings.
 * Live smoke test against the real MailboxTemp API ✅ (create inbox, list, WebSocket `connected` in 1.5 s).
 * **F-31 (no tests) is now addressed**: 21 JVM tests were added (models contract, OTP extraction,
   email-list merge, opt-in live smoke). CI still only assembles debug — wiring `testDebugUnitTest` into

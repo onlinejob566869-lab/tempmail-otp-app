@@ -38,7 +38,9 @@ import com.tempmail.otp.ui.InboxEntry
 import com.tempmail.otp.ui.MainViewModel
 import com.tempmail.otp.ui.UiState
 import com.tempmail.otp.util.ClipboardHelper
+import com.tempmail.otp.util.InboxClock
 import com.tempmail.otp.util.NotificationHelper
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
 
@@ -76,6 +78,9 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsState()
     val inboxes by viewModel.inboxes.collectAsState()
     val activeIndex by viewModel.activeIndex.collectAsState()
+    val creationsToday by viewModel.creationsToday.collectAsState()
+    val dailyLimit = viewModel.dailyLimit
+    val notice by viewModel.notice.collectAsState()
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -120,11 +125,43 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
             InboxSwitcher(
                 inboxes = inboxes,
                 activeIndex = activeIndex,
+                creationsToday = creationsToday,
+                dailyLimit = dailyLimit,
                 onSwitch = { viewModel.switchInbox(it) },
                 onAdd = { viewModel.createInbox() },
                 onDelete = { viewModel.deleteInbox(it) }
             )
             Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        // Transient message (quota, extend result, expired inbox)
+        if (notice != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 2.dp)
+                ) {
+                    Text(
+                        text = notice!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { viewModel.dismissNotice() }) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Dismiss",
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
         }
 
         // Main content
@@ -170,6 +207,8 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
 fun InboxSwitcher(
     inboxes: List<InboxEntry>,
     activeIndex: Int,
+    creationsToday: Int,
+    dailyLimit: Int,
     onSwitch: (Int) -> Unit,
     onAdd: () -> Unit,
     onDelete: (Int) -> Unit
@@ -212,10 +251,20 @@ fun InboxSwitcher(
             }
         }
         item {
-            TextButton(onClick = onAdd) {
+            TextButton(
+                onClick = onAdd,
+                enabled = creationsToday < dailyLimit
+            ) {
                 Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Add Email", fontSize = 12.sp)
+                Text(
+                    text = if (creationsToday < dailyLimit) {
+                        "Add Email ($creationsToday/$dailyLimit today)"
+                    } else {
+                        "Daily limit reached ($creationsToday/$dailyLimit)"
+                    },
+                    fontSize = 12.sp
+                )
             }
         }
     }
@@ -223,6 +272,8 @@ fun InboxSwitcher(
 
 @Composable
 fun IdleContent(viewModel: MainViewModel) {
+    val creationsToday by viewModel.creationsToday.collectAsState()
+    val dailyLimit = viewModel.dailyLimit
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -240,8 +291,17 @@ fun IdleContent(viewModel: MainViewModel) {
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Aaj: $creationsToday/$dailyLimit inboxes (free tier)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(modifier = Modifier.height(24.dp))
-            Button(onClick = { viewModel.createInbox() }) {
+            Button(
+                onClick = { viewModel.createInbox() },
+                enabled = creationsToday < dailyLimit
+            ) {
                 Icon(Icons.Default.Add, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Generate Temp Email")
@@ -285,6 +345,49 @@ fun ActiveInboxContent(
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
+
+                // Expiry countdown + extend (free inboxes live 60 minutes)
+                val expiresAt = inbox.expiresAt
+                if (expiresAt != null) {
+                    var now by remember(inbox.address) { mutableStateOf(System.currentTimeMillis()) }
+                    LaunchedEffect(inbox.address) {
+                        while (true) {
+                            delay(1000L)
+                            now = System.currentTimeMillis()
+                        }
+                    }
+                    val remaining = expiresAt - now
+                    val expired = remaining <= 0L
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = if (expired) {
+                                "Expired — create a new inbox"
+                            } else {
+                                "Expires in ${InboxClock.formatRemaining(remaining)}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (expired || remaining < 5 * 60 * 1000L) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (expired) {
+                            TextButton(onClick = { viewModel.createInbox() }) {
+                                Text("New inbox", fontSize = 12.sp)
+                            }
+                        } else {
+                            TextButton(onClick = { viewModel.extendInbox(inbox.address) }) {
+                                Text("Extend +10 min", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
 
                 // Last OTP
                 if (inbox.lastOtp != null) {

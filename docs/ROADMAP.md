@@ -11,6 +11,7 @@
 | P0 fixes | F-01 WS-thread crash · F-02 live email list · F-03 UI freeze · F-04 restore replay |
 | CI | tests hooked onto `assembleDebug` (no workflow edit needed) |
 | Build | debug APK green; release still blocked by the missing keystore (F-18) |
+| **Batch A** | ✅ **done** — inbox TTL/countdown, Extend +10 min, 404 handling, 10/day quota UX (v1.0.1) |
 
 ## Priority 1 — "app actually usable for more than 10 minutes"
 
@@ -79,7 +80,7 @@ These are the issues a real user hits in the first session.
 
 ## Suggested order of work
 
-1. **Batch A (1.5 days):** #1 TTL + #2 daily-limit UX → biggest real-user impact.
+1. ~~**Batch A (1.5 days):** #1 TTL + #2 daily-limit UX~~ ✅ **done in v1.0.1**
 2. **Batch B (2 days):** #3 single socket owner + #4 real connection state + #5 tombstones → reliable delivery.
 3. **Batch C (1.5 days):** #6 service recovery + #7 Android 15 timeout + #9 error surfacing.
 4. **Batch D (1 day):** #11–#18 security/release hardening.

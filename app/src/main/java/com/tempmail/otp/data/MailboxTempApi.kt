@@ -14,6 +14,14 @@ interface MailboxTempApi {
     @POST("api/inbox/generate")
     suspend fun createInbox(): InboxResponse
 
+    /** Inbox metadata — remaining lifetime is in [InboxMeta.ttl] seconds. */
+    @GET("api/inbox/{address}")
+    suspend fun getInbox(@Path("address") address: String): InboxMeta
+
+    /** Extend a live inbox by 10 minutes. Has no effect on an expired inbox. */
+    @POST("api/inbox/{address}/extend")
+    suspend fun extendInbox(@Path("address") address: String): OkResponse
+
     /** List messages in an inbox (newest first) */
     @GET("api/inbox/{address}/emails")
     suspend fun listEmails(@Path("address") address: String): EmailListResponse

@@ -27,6 +27,8 @@ class ModelsTest {
 
         assertTrue(response.ok)
         assertEquals("k3x91qa@fakhita.xyz", response.address)
+        assertEquals("2026-08-23T18:23:26.684Z", response.expires)
+        assertEquals("0177695b-7bb8-4f1c-9427-0669199be808", response.inboxId)
         assertNull(response.error)
     }
 
@@ -100,6 +102,21 @@ class ModelsTest {
         assertEquals("Your code is 482913", email.bodyText)
         assertTrue(email.bodyHtml!!.contains("482913"))
         assertTrue(email.read)
+    }
+
+    @Test
+    fun `inbox metadata parses ttl and expiry`() {
+        val json = """
+            {"ok":true,"id":"0177695b","address":"k3x91qa@fakhita.xyz","tier":"free",
+             "expires_at":"2026-08-23T18:23:26.684Z","ttl":2418}
+        """.trimIndent()
+
+        val meta = moshi.adapter(InboxMeta::class.java).fromJson(json)!!
+
+        assertTrue(meta.ok)
+        assertEquals(2418L, meta.ttl)
+        assertEquals("2026-08-23T18:23:26.684Z", meta.expiresAt)
+        assertEquals("free", meta.tier)
     }
 
     @Test

@@ -9,7 +9,7 @@
 |---|---|---|
 | Compile + package debug APK | `./gradlew assembleDebug` | ✅ **PASS** (1m 44s first run, 11 MB APK) |
 | Full clean verification | `./gradlew clean assembleDebug testDebugUnitTest lintDebug --no-build-cache` | ✅ **PASS** — 52/52 tasks executed, no cache, 34 s |
-| JVM unit tests | `./gradlew testDebugUnitTest` | ✅ **PASS — 21/21**, 0 failures, 0 skipped |
+| JVM unit tests | `./gradlew testDebugUnitTest` | ✅ **PASS — 38/38**, 0 failures, 0 skipped |
 | Android lint | `./gradlew lintDebug` | ✅ **PASS — 0 errors, 10 warnings** |
 | Live API + WebSocket smoke | `./gradlew testDebugUnitTest -Plive` | ✅ **PASS** (1.5 s) |
 | Release APK | `./gradlew assembleRelease` | ⛔ **FAIL** — `Keystore file '/workspace/release-keystore.jks' not found for signing config 'release'` (the file is gitignored and absent) |
@@ -62,6 +62,14 @@ Covers the list logic behind the F-02 fix:
 * `newestOtp` picks the first (newest) message that has a code, and returns null when none does
 
 **Proves:** the live inbox list update cannot duplicate or grow without bound.
+
+### `InboxClockTest.kt` (7) · `DailyLimitTest.kt` (5) · `InboxEntryTest.kt` (4)
+Batch A (v1.0.1) coverage:
+
+* ISO-8601 expiry parsing — `Z`, fractional seconds, offsets, invalid input
+* countdown formatting — `1:05`, `1:00:00`, and `Expired` at/below zero
+* UTC day keys and the daily-quota reset on a new day
+* `InboxEntry.isExpired()` at, before and after the deadline; inboxes without a deadline never expire
 
 ### `app/src/test/java/com/tempmail/otp/LiveApiSmokeTest.kt` — 1 live test (opt-in)
 Excluded from the default task; runs the app's own `ApiClient`/`MailboxWebSocketClient` against the
