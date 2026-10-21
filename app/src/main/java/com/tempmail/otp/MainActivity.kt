@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -33,12 +34,16 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tempmail.otp.data.EmailSummary
+import com.tempmail.otp.data.InboxMonitor
 import com.tempmail.otp.service.OtpPollingService
 import com.tempmail.otp.ui.InboxEntry
 import com.tempmail.otp.ui.MainViewModel
 import com.tempmail.otp.ui.UiState
+import com.tempmail.otp.util.AppVisibility
 import com.tempmail.otp.util.ClipboardHelper
+import com.tempmail.otp.util.InboxClock
 import com.tempmail.otp.util.NotificationHelper
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
 
@@ -48,7 +53,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(
                     this, Manifest.permission.POST_NOTIFICATIONS
@@ -69,6 +73,16 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onStart() {
+        super.onStart()
+        AppVisibility.isForeground = true
+    }
+
+    override fun onStop() {
+        AppVisibility.isForeground = false
+        super.onStop()
+    }
 }
 
 @Composable
@@ -76,6 +90,11 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsState()
     val inboxes by viewModel.inboxes.collectAsState()
     val activeIndex by viewModel.activeIndex.collectAsState()
+    val creationsToday by viewModel.creationsToday.collectAsState()
+    val dailyLimit = viewModel.dailyLimit
+    val notice by viewModel.notice.collectAsState()
+    val states by viewModel.monitorStates.collectAsState()
+    val bulk by viewModel.bulkProgress.collectAsState()
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -106,7 +125,7 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Multi-inbox • Background polling",
+                    text = "10 parallel inboxes • real-time OTP",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -115,16 +134,68 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
 
         Spacer(modifier = Modifier.height(12.dp))
 
+        // Bulk creation progress (1..10 inboxes)
+        if (bulk != null) {
+            val (done, total) = bulk!!
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                LinearProgressIndicator(
+                    progress = { if (total == 0) 0f else done.toFloat() / total },
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("$done/$total", style = MaterialTheme.typography.labelSmall)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
         // Inbox tabs / switcher
         if (inboxes.isNotEmpty()) {
             InboxSwitcher(
                 inboxes = inboxes,
                 activeIndex = activeIndex,
+                states = states,
+                creationsToday = creationsToday,
+                dailyLimit = dailyLimit,
                 onSwitch = { viewModel.switchInbox(it) },
                 onAdd = { viewModel.createInbox() },
+                onAddTen = { viewModel.createInboxes(10) },
+                onExtendAll = { viewModel.extendAll() },
                 onDelete = { viewModel.deleteInbox(it) }
             )
             Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        // Transient message (quota, extend result, expired inbox)
+        if (notice != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 2.dp)
+                ) {
+                    Text(
+                        text = notice!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { viewModel.dismissNotice() }) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Dismiss",
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
         }
 
         // Main content
@@ -135,16 +206,6 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
             is UiState.Ready -> {
                 if (state.inboxes.isNotEmpty() && activeIndex < state.inboxes.size) {
                     val active = state.inboxes[activeIndex]
-                    ActiveInboxContent(
-                        inbox = active,
-                        viewModel = viewModel,
-                        context = context
-                    )
-                }
-            }
-            is UiState.OtpFound -> {
-                if (inboxes.isNotEmpty() && activeIndex < inboxes.size) {
-                    val active = inboxes[activeIndex]
                     ActiveInboxContent(
                         inbox = active,
                         viewModel = viewModel,
@@ -180,52 +241,92 @@ fun AppScreen(viewModel: MainViewModel = viewModel()) {
 fun InboxSwitcher(
     inboxes: List<InboxEntry>,
     activeIndex: Int,
+    states: Map<String, InboxMonitor.State>,
+    creationsToday: Int,
+    dailyLimit: Int,
     onSwitch: (Int) -> Unit,
     onAdd: () -> Unit,
+    onAddTen: () -> Unit,
+    onExtendAll: () -> Unit,
     onDelete: (Int) -> Unit
 ) {
-    LazyColumn(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 120.dp)
-    ) {
-        items(inboxes.size) { index ->
-            val inbox = inboxes[index]
-            val isActive = index == activeIndex
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 2.dp)
-            ) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // One horizontal row keeps all 10 inboxes reachable instead of hiding them in 2 rows.
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            items(inboxes.size) { index ->
+                val inbox = inboxes[index]
+                val expired = inbox.isExpired()
+                val connected = states[inbox.address]?.connected == true
                 FilterChip(
-                    selected = isActive,
+                    selected = index == activeIndex,
                     onClick = { onSwitch(index) },
-                    label = { Text(inbox.label, fontSize = 12.sp) },
-                    modifier = Modifier.weight(1f)
-                )
-                if (isActive) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    IconButton(
-                        onClick = { onDelete(index) },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = "Delete",
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.error
-                        )
+                    label = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = when {
+                                    expired -> "⏳"
+                                    connected -> "🟢"
+                                    else -> "🟡"
+                                },
+                                fontSize = 10.sp
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(inbox.label, fontSize = 12.sp)
+                            if (inbox.emails.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "${inbox.emails.size}",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
                     }
-                }
+                )
+            }
+            item {
+                AssistChip(
+                    onClick = onAdd,
+                    enabled = creationsToday < dailyLimit,
+                    label = { Text("+1", fontSize = 12.sp) }
+                )
+            }
+            item {
+                AssistChip(
+                    onClick = onAddTen,
+                    enabled = creationsToday < dailyLimit,
+                    label = { Text("+10", fontSize = 12.sp) }
+                )
             }
         }
-        item {
-            TextButton(onClick = onAdd) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Add Email", fontSize = 12.sp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = "$creationsToday/$dailyLimit today • ${inboxes.size} inbox(es)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            if (inboxes.size > 1) {
+                TextButton(onClick = onExtendAll) {
+                    Text("Extend all", fontSize = 11.sp)
+                }
+            }
+            IconButton(
+                onClick = { onDelete(activeIndex) },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "Delete inbox",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.error
+                )
             }
         }
     }
@@ -233,6 +334,8 @@ fun InboxSwitcher(
 
 @Composable
 fun IdleContent(viewModel: MainViewModel) {
+    val creationsToday by viewModel.creationsToday.collectAsState()
+    val dailyLimit = viewModel.dailyLimit
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -250,11 +353,27 @@ fun IdleContent(viewModel: MainViewModel) {
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Aaj: $creationsToday/$dailyLimit inboxes (free tier)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(modifier = Modifier.height(24.dp))
-            Button(onClick = { viewModel.createInbox() }) {
+            Button(
+                onClick = { viewModel.createInbox() },
+                enabled = creationsToday < dailyLimit
+            ) {
                 Icon(Icons.Default.Add, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Generate Temp Email")
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            TextButton(
+                onClick = { viewModel.createInboxes(10) },
+                enabled = creationsToday < dailyLimit
+            ) {
+                Text("Create 10 inboxes (parallel)", fontSize = 12.sp)
             }
         }
     }
@@ -266,6 +385,7 @@ fun ActiveInboxContent(
     viewModel: MainViewModel,
     context: android.content.Context
 ) {
+    val states by viewModel.monitorStates.collectAsState()
     Column(modifier = Modifier.fillMaxSize()) {
         // Email address card
         Card(
@@ -294,7 +414,64 @@ fun ActiveInboxContent(
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Copy")
                     }
                 }
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = if (states[inbox.address]?.connected == true) {
+                        "● Live — listening for mail"
+                    } else {
+                        "○ Connecting…"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (states[inbox.address]?.connected == true) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Expiry countdown + extend (free inboxes live 60 minutes)
+                val expiresAt = inbox.expiresAt
+                if (expiresAt != null) {
+                    var now by remember(inbox.address) { mutableStateOf(System.currentTimeMillis()) }
+                    LaunchedEffect(inbox.address) {
+                        while (true) {
+                            delay(1000L)
+                            now = System.currentTimeMillis()
+                        }
+                    }
+                    val remaining = expiresAt - now
+                    val expired = remaining <= 0L
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = if (expired) {
+                                "Expired — create a new inbox"
+                            } else {
+                                "Expires in ${InboxClock.formatRemaining(remaining)}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (expired || remaining < 5 * 60 * 1000L) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (expired) {
+                            TextButton(onClick = { viewModel.createInbox() }) {
+                                Text("New inbox", fontSize = 12.sp)
+                            }
+                        } else {
+                            TextButton(onClick = { viewModel.extendInbox(inbox.address) }) {
+                                Text("Extend +10 min", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
 
                 // Last OTP
                 if (inbox.lastOtp != null) {

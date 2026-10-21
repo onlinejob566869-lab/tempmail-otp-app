@@ -28,15 +28,25 @@ object NotificationHelper {
         }
     }
 
-    fun showOtpNotification(context: Context, otp: String, from: String) {
+    fun showOtpNotification(context: Context, otp: String, from: String, address: String? = null) {
+        val notificationId = if (address != null) {
+            NotificationIds.forAddress(address)
+        } else {
+            NOTIFICATION_ID
+        }
+        val title = if (address != null) {
+            "OTP $otp · ${address.substringBefore("@")}"
+        } else {
+            "OTP Received: $otp"
+        }
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("OTP Received: $otp")
-            .setContentText("From: $from — code copied to clipboard")
+            .setContentTitle(title)
+            .setContentText("From: $from")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
 
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, builder.build())
+        manager.notify(notificationId, builder.build())
     }
 }

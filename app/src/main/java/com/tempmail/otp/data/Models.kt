@@ -10,8 +10,36 @@ import com.squareup.moshi.JsonClass
 data class InboxResponse(
     val ok: Boolean = false,
     val address: String? = null,
+    /** ISO-8601 timestamp at which the inbox is purged. */
+    val expires: String? = null,
+    val inboxId: String? = null,
     val error: String? = null
 )
+
+/**
+ * Response from GET /api/inbox/{address} — metadata and remaining lifetime.
+ */
+@JsonClass(generateAdapter = true)
+data class InboxMeta(
+    val ok: Boolean = false,
+    val id: String? = null,
+    val address: String? = null,
+    val tier: String? = null,
+    @Json(name = "expires_at") val expiresAt: String? = null,
+    /** Seconds until expiry. */
+    val ttl: Long? = null,
+    val error: String? = null
+)
+
+/**
+ * Generic `{ "ok": true }` response used by extend/delete style endpoints.
+ */
+@JsonClass(generateAdapter = true)
+data class OkResponse(
+    val ok: Boolean = false,
+    val error: String? = null
+)
+
 
 /**
  * Single email summary from GET /api/inbox/{address}/emails

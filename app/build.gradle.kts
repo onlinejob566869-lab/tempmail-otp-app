@@ -12,8 +12,8 @@ android {
         applicationId = "com.tempmail.otp"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.1.0"
     }
 
     signingConfigs {
@@ -53,6 +53,11 @@ android {
         abortOnError = false
         checkReleaseBuilds = false
     }
+
+    testOptions {
+        // Lets plain JVM tests touch Android stubs (e.g. android.util.Log in the WS client)
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -84,4 +89,24 @@ dependencies {
 
     // Debugging
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // Unit tests
+    testImplementation("junit:junit:4.13.2")
+}
+
+tasks.withType<Test>().configureEach {
+    // LiveApiSmokeTest hits the real MailboxTemp API. Keep the default suite offline;
+    // run it explicitly with: ./gradlew testDebugUnitTest -Plive
+    if (!project.hasProperty("live")) {
+        exclude("**/LiveApiSmokeTest*")
+    }
+}
+
+// The CI workflow is protected (the GitHub App used by this workspace cannot modify
+// .github/workflows/*), and it only runs `assembleDebug`. Hooking the unit tests onto that
+// task keeps them in the CI loop without touching the workflow file.
+tasks.configureEach {
+    if (name == "assembleDebug") {
+        dependsOn("testDebugUnitTest")
+    }
 }
